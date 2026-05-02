@@ -4,7 +4,8 @@ use std::error::Error;
 use std::fs::{self, File};
 use std::io::copy;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::{thread, time::Duration};
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -16,14 +17,21 @@ const WHISPER_MODEL_FILE: &str = "ggml-base.bin";
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
 struct AppState {
-    is_recording: Mutex<bool>,
+    is_recording: AtomicBool,
     audio_buffer: Mutex<Vec<f32>>,
-    input_sample_rate: Mutex<u32>,
-    input_channels: Mutex<u16>,
+    audio_device: AudioDevice,
+}
+
+struct AudioDevice {
+    device: cpal::Device,
+    config: cpal::StreamConfig,
+    sample_format: cpal::SampleFormat,
+    sample_rate: u32,
+    channels: u16,
 }
 
 struct WhisperState {
-    context: Mutex<WhisperContext>,
+    context: Arc<Mutex<WhisperContext>>,
 }
 
 #[tauri::command]
@@ -50,59 +58,46 @@ fn stop_and_transcribe(
     whisper_state: tauri::State<WhisperState>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
-    do_stop_and_transcribe(&app_state, &whisper_state, &app)
+    do_stop_recording(&app_state, &app)?;
+    let text = transcribe_audio(&app_state, &whisper_state)?;
+    if !text.is_empty() {
+        paste_text(&text)?;
+    }
+    app.emit("transcription_done", &text)
+        .map_err(|e| e.to_string())?;
+    Ok(text)
 }
 
 fn do_start_recording(state: &AppState, app: &tauri::AppHandle) -> Result<(), String> {
-    {
-        let mut recording = state
-            .is_recording
-            .lock()
-            .map_err(|_| "No se pudo bloquear is_recording".to_string())?;
-
-        if *recording {
-            return Ok(());
-        }
-
-        state
-            .audio_buffer
-            .lock()
-            .map_err(|_| "No se pudo bloquear audio_buffer".to_string())?
-            .clear();
-
-        *recording = true;
+    if state.is_recording.swap(true, Ordering::AcqRel) {
+        return Ok(());
     }
 
-    let app_handle = app.clone();
+    state
+        .audio_buffer
+        .lock()
+        .map_err(|_| "No se pudo bloquear audio_buffer".to_string())?
+        .clear();
+
+    let app_for_audio = app.clone();
     thread::spawn(move || {
-        if let Err(error) = record_audio(app_handle.clone()) {
+        if let Err(error) = record_audio(app_for_audio.clone()) {
             eprintln!("audio recording error: {error}");
-
-            if let Some(state) = app_handle.try_state::<AppState>() {
-                if let Ok(mut recording) = state.is_recording.lock() {
-                    *recording = false;
-                }
+            if let Some(state) = app_for_audio.try_state::<AppState>() {
+                state.is_recording.store(false, Ordering::Release);
             }
-
-            let _ = app_handle.emit("recording_error", error);
+            let _ = app_for_audio.emit("recording_error", error);
         }
     });
 
-    app.emit("recording_started", ())
-        .map_err(|error| error.to_string())?;
-    show_overlay(app)?;
+    let _ = app.emit("recording_started", ());
+    let _ = show_overlay(app);
 
     Ok(())
 }
 
 fn do_stop_recording(state: &AppState, app: &tauri::AppHandle) -> Result<usize, String> {
-    {
-        let mut recording = state
-            .is_recording
-            .lock()
-            .map_err(|_| "No se pudo bloquear is_recording".to_string())?;
-        *recording = false;
-    }
+    state.is_recording.store(false, Ordering::Release);
 
     let audio_len = state
         .audio_buffer
@@ -110,56 +105,29 @@ fn do_stop_recording(state: &AppState, app: &tauri::AppHandle) -> Result<usize, 
         .map_err(|_| "No se pudo bloquear audio_buffer".to_string())?
         .len();
 
-    app.emit("recording_stopped", audio_len)
-        .map_err(|error| error.to_string())?;
-    hide_overlay(app)?;
+    let _ = app.emit("recording_stopped", audio_len);
+    let _ = hide_overlay(app);
 
     Ok(audio_len)
 }
 
-fn do_stop_and_transcribe(
-    app_state: &AppState,
-    whisper_state: &WhisperState,
-    app: &tauri::AppHandle,
-) -> Result<String, String> {
-    do_stop_recording(app_state, app)?;
-
-    let text = transcribe_audio(app_state, whisper_state)?;
-
-    if !text.is_empty() {
-        paste_text(&text)?;
-    }
-
-    app.emit("transcription_done", &text)
-        .map_err(|error| error.to_string())?;
-
-    Ok(text)
-}
-
 fn transcribe_audio(app_state: &AppState, whisper_state: &WhisperState) -> Result<String, String> {
-    let (audio, input_sample_rate, input_channels) = {
-        let audio = app_state
+    let audio = {
+        let mut buf = app_state
             .audio_buffer
             .lock()
-            .map_err(|_| "No se pudo bloquear audio_buffer".to_string())?
-            .clone();
-        let input_sample_rate = *app_state
-            .input_sample_rate
-            .lock()
-            .map_err(|_| "No se pudo bloquear input_sample_rate".to_string())?;
-        let input_channels = *app_state
-            .input_channels
-            .lock()
-            .map_err(|_| "No se pudo bloquear input_channels".to_string())?;
-
-        (audio, input_sample_rate, input_channels)
+            .map_err(|_| "No se pudo bloquear audio_buffer".to_string())?;
+        std::mem::take(&mut *buf)
     };
 
     if audio.is_empty() {
         return Ok(String::new());
     }
 
-    let whisper_audio = prepare_audio_for_whisper(&audio, input_sample_rate, input_channels);
+    let sample_rate = app_state.audio_device.sample_rate;
+    let channels = app_state.audio_device.channels;
+
+    let whisper_audio = prepare_audio_for_whisper(&audio, sample_rate, channels);
 
     let context = whisper_state
         .context
@@ -168,6 +136,7 @@ fn transcribe_audio(app_state: &AppState, whisper_state: &WhisperState) -> Resul
     let mut state = context
         .create_state()
         .map_err(|error| format!("No se pudo crear WhisperState: {error}"))?;
+
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_language(Some("es"));
     params.set_translate(false);
@@ -184,12 +153,6 @@ fn transcribe_audio(app_state: &AppState, whisper_state: &WhisperState) -> Resul
     for segment in state.as_iter() {
         text.push_str(&segment.to_string());
     }
-
-    app_state
-        .audio_buffer
-        .lock()
-        .map_err(|_| "No se pudo bloquear audio_buffer".to_string())?
-        .clear();
 
     Ok(text.trim().to_string())
 }
@@ -217,26 +180,8 @@ fn paste_text(text: &str) -> Result<(), String> {
 }
 
 fn record_audio(app: tauri::AppHandle) -> Result<(), String> {
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| "No se encontro un microfono de entrada".to_string())?;
-    let supported_config = device
-        .default_input_config()
-        .map_err(|error| format!("No se pudo leer la configuracion del microfono: {error}"))?;
-    let sample_format = supported_config.sample_format();
-    let stream_config: cpal::StreamConfig = supported_config.into();
-    {
-        let state = app.state::<AppState>();
-        if let Ok(mut sample_rate) = state.input_sample_rate.lock() {
-            *sample_rate = stream_config.sample_rate.0;
-        }
-        {
-            if let Ok(mut channels) = state.input_channels.lock() {
-                *channels = stream_config.channels;
-            };
-        }
-    }
+    let state = app.state::<AppState>();
+    let audio_device = &state.audio_device;
 
     let app_for_error = app.clone();
     let error_callback = move |error: cpal::StreamError| {
@@ -244,11 +189,11 @@ fn record_audio(app: tauri::AppHandle) -> Result<(), String> {
         let _ = app_for_error.emit("recording_error", error.to_string());
     };
 
-    let stream = match sample_format {
+    let stream = match audio_device.sample_format {
         cpal::SampleFormat::F32 => {
             let app_for_data = app.clone();
-            device.build_input_stream(
-                &stream_config,
+            audio_device.device.build_input_stream(
+                &audio_device.config,
                 move |data: &[f32], _| append_f32_samples(&app_for_data, data),
                 error_callback,
                 None,
@@ -256,8 +201,8 @@ fn record_audio(app: tauri::AppHandle) -> Result<(), String> {
         }
         cpal::SampleFormat::I16 => {
             let app_for_data = app.clone();
-            device.build_input_stream(
-                &stream_config,
+            audio_device.device.build_input_stream(
+                &audio_device.config,
                 move |data: &[i16], _| append_i16_samples(&app_for_data, data),
                 error_callback,
                 None,
@@ -265,14 +210,16 @@ fn record_audio(app: tauri::AppHandle) -> Result<(), String> {
         }
         cpal::SampleFormat::U16 => {
             let app_for_data = app.clone();
-            device.build_input_stream(
-                &stream_config,
+            audio_device.device.build_input_stream(
+                &audio_device.config,
                 move |data: &[u16], _| append_u16_samples(&app_for_data, data),
                 error_callback,
                 None,
             )
         }
-        _ => return Err(format!("Formato de audio no soportado: {sample_format:?}")),
+        sample_format => {
+            return Err(format!("Formato de audio no soportado: {sample_format:?}"));
+        }
     }
     .map_err(|error| format!("No se pudo abrir el microfono: {error}"))?;
 
@@ -280,27 +227,20 @@ fn record_audio(app: tauri::AppHandle) -> Result<(), String> {
         .play()
         .map_err(|error| format!("No se pudo iniciar el microfono: {error}"))?;
 
-    while is_recording(&app) {
+    while state.is_recording.load(Ordering::Acquire) {
         thread::sleep(Duration::from_millis(50));
     }
 
     Ok(())
 }
 
-fn is_recording(app: &tauri::AppHandle) -> bool {
-    app.state::<AppState>()
-        .is_recording
-        .lock()
-        .map(|recording| *recording)
-        .unwrap_or(false)
-}
-
 fn append_f32_samples(app: &tauri::AppHandle, data: &[f32]) {
-    if !is_recording(app) {
+    let state = app.state::<AppState>();
+    if !state.is_recording.load(Ordering::Acquire) {
         return;
     }
 
-    if let Ok(mut audio_buffer) = app.state::<AppState>().audio_buffer.lock() {
+    if let Ok(mut audio_buffer) = state.audio_buffer.lock() {
         audio_buffer.extend_from_slice(data);
     }
 
@@ -308,11 +248,12 @@ fn append_f32_samples(app: &tauri::AppHandle, data: &[f32]) {
 }
 
 fn append_i16_samples(app: &tauri::AppHandle, data: &[i16]) {
-    if !is_recording(app) {
+    let state = app.state::<AppState>();
+    if !state.is_recording.load(Ordering::Acquire) {
         return;
     }
 
-    if let Ok(mut audio_buffer) = app.state::<AppState>().audio_buffer.lock() {
+    if let Ok(mut audio_buffer) = state.audio_buffer.lock() {
         audio_buffer.extend(data.iter().map(|sample| *sample as f32 / i16::MAX as f32));
     }
 
@@ -320,11 +261,12 @@ fn append_i16_samples(app: &tauri::AppHandle, data: &[i16]) {
 }
 
 fn append_u16_samples(app: &tauri::AppHandle, data: &[u16]) {
-    if !is_recording(app) {
+    let state = app.state::<AppState>();
+    if !state.is_recording.load(Ordering::Acquire) {
         return;
     }
 
-    if let Ok(mut audio_buffer) = app.state::<AppState>().audio_buffer.lock() {
+    if let Ok(mut audio_buffer) = state.audio_buffer.lock() {
         audio_buffer.extend(
             data.iter()
                 .map(|sample| (*sample as f32 - 32768.0) / 32768.0),
@@ -395,13 +337,35 @@ fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     output
 }
 
+fn initialize_audio_device() -> Result<AudioDevice, String> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| "No se encontro un microfono de entrada".to_string())?;
+    let supported_config = device
+        .default_input_config()
+        .map_err(|error| format!("No se pudo leer la configuracion del microfono: {error}"))?;
+    let sample_format = supported_config.sample_format();
+    let stream_config: cpal::StreamConfig = supported_config.into();
+    let sample_rate = stream_config.sample_rate.0;
+    let channels = stream_config.channels;
+
+    Ok(AudioDevice {
+        device,
+        config: stream_config,
+        sample_format,
+        sample_rate,
+        channels,
+    })
+}
+
 fn initialize_whisper(app: &tauri::App) -> Result<WhisperState, Box<dyn Error>> {
     let model_path = ensure_whisper_model(app)?;
     let context =
         WhisperContext::new_with_params(&model_path, WhisperContextParameters::default())?;
 
     Ok(WhisperState {
-        context: Mutex::new(context),
+        context: Arc::new(Mutex::new(context)),
     })
 }
 
@@ -480,25 +444,43 @@ pub fn run() {
                             let _ = do_start_recording(&state, app);
                         }
                         ShortcutState::Released => {
-                            let whisper_state = app.state::<WhisperState>();
-                            if let Err(error) = do_stop_and_transcribe(&state, &whisper_state, app)
-                            {
-                                let _ = app.emit("transcription_error", error);
-                            }
+                            let _ = do_stop_recording(&state, app);
+
+                            let app_clone = app.clone();
+                            thread::spawn(move || {
+                                let app_state = app_clone.state::<AppState>();
+                                let whisper_state = app_clone.state::<WhisperState>();
+
+                                match transcribe_audio(&app_state, &whisper_state) {
+                                    Ok(text) => {
+                                        if !text.is_empty() {
+                                            if let Err(e) = paste_text(&text) {
+                                                let _ = app_clone.emit("transcription_error", e);
+                                                return;
+                                            }
+                                        }
+                                        let _ = app_clone.emit("transcription_done", &text);
+                                    }
+                                    Err(e) => {
+                                        let _ = app_clone.emit("transcription_error", e);
+                                    }
+                                }
+                            });
                         }
                     }
                 })
                 .build(),
         )
-        .manage(AppState {
-            is_recording: Mutex::new(false),
-            audio_buffer: Mutex::new(Vec::new()),
-            input_sample_rate: Mutex::new(WHISPER_SAMPLE_RATE),
-            input_channels: Mutex::new(1),
-        })
         .setup(|app| {
             let whisper_state = initialize_whisper(app)?;
             app.manage(whisper_state);
+
+            let audio_device = initialize_audio_device()?;
+            app.manage(AppState {
+                is_recording: AtomicBool::new(false),
+                audio_buffer: Mutex::new(Vec::new()),
+                audio_device,
+            });
 
             app.handle()
                 .global_shortcut()
