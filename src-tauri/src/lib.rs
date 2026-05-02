@@ -303,6 +303,8 @@ fn append_f32_samples(app: &tauri::AppHandle, data: &[f32]) {
     if let Ok(mut audio_buffer) = app.state::<AppState>().audio_buffer.lock() {
         audio_buffer.extend_from_slice(data);
     }
+
+    emit_audio_level(app, data.iter().copied());
 }
 
 fn append_i16_samples(app: &tauri::AppHandle, data: &[i16]) {
@@ -313,6 +315,8 @@ fn append_i16_samples(app: &tauri::AppHandle, data: &[i16]) {
     if let Ok(mut audio_buffer) = app.state::<AppState>().audio_buffer.lock() {
         audio_buffer.extend(data.iter().map(|sample| *sample as f32 / i16::MAX as f32));
     }
+
+    emit_audio_level(app, data.iter().map(|s| *s as f32 / i16::MAX as f32));
 }
 
 fn append_u16_samples(app: &tauri::AppHandle, data: &[u16]) {
@@ -326,6 +330,25 @@ fn append_u16_samples(app: &tauri::AppHandle, data: &[u16]) {
                 .map(|sample| (*sample as f32 - 32768.0) / 32768.0),
         );
     }
+
+    emit_audio_level(
+        app,
+        data.iter().map(|s| (*s as f32 - 32768.0) / 32768.0),
+    );
+}
+
+fn emit_audio_level<I: Iterator<Item = f32>>(app: &tauri::AppHandle, samples: I) {
+    let mut sum_sq = 0.0f32;
+    let mut count = 0u32;
+    for sample in samples {
+        sum_sq += sample * sample;
+        count += 1;
+    }
+    if count == 0 {
+        return;
+    }
+    let rms = (sum_sq / count as f32).sqrt();
+    let _ = app.emit("audio_level", rms);
 }
 
 fn prepare_audio_for_whisper(input: &[f32], sample_rate: u32, channels: u16) -> Vec<f32> {
@@ -410,6 +433,23 @@ fn download_whisper_model(model_path: &Path) -> Result<(), Box<dyn Error>> {
 
 fn show_overlay(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("overlay") {
+        if let Ok(Some(monitor)) = window.current_monitor() {
+            let monitor_size = monitor.size();
+            let monitor_pos = monitor.position();
+            let scale = monitor.scale_factor();
+            let outer = window.outer_size().map_err(|e| e.to_string())?;
+
+            let bottom_margin = (80.0 * scale) as i32;
+            let x = monitor_pos.x + (monitor_size.width as i32 - outer.width as i32) / 2;
+            let y = monitor_pos.y + monitor_size.height as i32
+                - outer.height as i32
+                - bottom_margin;
+
+            window
+                .set_position(tauri::PhysicalPosition { x, y })
+                .map_err(|e| e.to_string())?;
+        }
+
         window.show().map_err(|error| error.to_string())?;
         window
             .set_always_on_top(true)

@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
@@ -21,15 +22,16 @@
         "label": "overlay",
         "title": "",
         "url": "overlay.html",
-        "width": 160,
-        "height": 60,
+        "width": 148,
+        "height": 44,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
         "visible": false,
         "resizable": false,
-        "center": true,
-        "skipTaskbar": true
+        "skipTaskbar": true,
+        "focus": false,
+        "shadow": false
       }
     ],
     "security": {

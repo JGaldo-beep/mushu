@@ -5,86 +5,52 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title></title>
     <style>
-      :root {
-        background: transparent;
-      }
-
       html,
       body {
         width: 100%;
         height: 100%;
         margin: 0;
+        padding: 0;
         overflow: hidden;
         background: transparent;
       }
 
       body {
-        display: grid;
-        place-items: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         user-select: none;
       }
 
       .pill {
-        width: 148px;
-        height: 52px;
+        width: 100%;
+        height: 100%;
         display: flex;
         align-items: center;
         justify-content: center;
         border-radius: 999px;
-        background: rgba(0, 0, 0, 0.85);
-        box-shadow:
-          0 18px 44px rgba(0, 0, 0, 0.36),
-          inset 0 1px 0 rgba(255, 255, 255, 0.14);
+        background: rgba(15, 15, 15, 0.92);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
       }
 
       .wave {
-        width: 72px;
-        height: 28px;
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 7px;
+        gap: 6px;
+        height: 22px;
       }
 
       .bar {
-        width: 5px;
-        height: 8px;
+        width: 4px;
+        height: 6px;
         border-radius: 999px;
         background: #ffffff;
-        opacity: 0.94;
+        opacity: 0.95;
         transform-origin: center;
-        animation: sine-wave 900ms ease-in-out infinite;
-      }
-
-      .bar:nth-child(1) {
-        animation-delay: -360ms;
-      }
-
-      .bar:nth-child(2) {
-        animation-delay: -180ms;
-      }
-
-      .bar:nth-child(3) {
-        animation-delay: 0ms;
-      }
-
-      .bar:nth-child(4) {
-        animation-delay: -180ms;
-      }
-
-      .bar:nth-child(5) {
-        animation-delay: -360ms;
-      }
-
-      @keyframes sine-wave {
-        0%,
-        100% {
-          transform: scaleY(0.55);
-        }
-
-        50% {
-          transform: scaleY(3.25);
-        }
+        transform: scaleY(0.5);
+        will-change: transform;
       }
     </style>
   </head>
@@ -98,5 +64,39 @@
         <span class="bar"></span>
       </div>
     </div>
+    <script>
+      const bars = Array.from(document.querySelectorAll(".bar"));
+      const current = bars.map(() => 0);
+      let target = 0;
+
+      function tick() {
+        const now = performance.now();
+        bars.forEach((bar, i) => {
+          const phase = i * 0.55;
+          const wobble = Math.sin(now / 160 + phase) * 0.5 + 0.5;
+          const responsive = target * (0.45 + 0.55 * wobble);
+          current[i] += (responsive - current[i]) * 0.28;
+          const scale = 0.5 + current[i] * 3.2;
+          bar.style.transform = `scaleY(${scale})`;
+        });
+        requestAnimationFrame(tick);
+      }
+      tick();
+
+      function attachListener() {
+        if (window.__TAURI__ && window.__TAURI__.event) {
+          window.__TAURI__.event.listen("audio_level", (event) => {
+            const level = typeof event.payload === "number" ? event.payload : 0;
+            target = Math.min(1, level * 12);
+          });
+          window.__TAURI__.event.listen("recording_stopped", () => {
+            target = 0;
+          });
+        } else {
+          setTimeout(attachListener, 50);
+        }
+      }
+      attachListener();
+    </script>
   </body>
 </html>
