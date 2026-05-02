@@ -1,0 +1,82 @@
+:root {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: #151515;
+  background: #f3f5f1;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+}
+
+.container {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+.recorder-panel {
+  width: min(420px, 100%);
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 16px;
+  align-items: center;
+  padding: 20px;
+  border: 1px solid #d5dacb;
+  border-radius: 8px;
+  background: #fbfcf8;
+  box-shadow: 0 12px 32px rgba(31, 37, 25, 0.1);
+}
+
+.mic-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #9aa28c;
+  box-shadow: 0 0 0 6px rgba(154, 162, 140, 0.14);
+}
+
+.mic-dot.active {
+  background: #d93f2f;
+  box-shadow: 0 0 0 7px rgba(217, 63, 47, 0.16);
+  animation: pulse 900ms ease-in-out infinite;
+}
+
+.status-label {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.status-detail {
+  margin: 4px 0 0;
+  color: #59604f;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.preview {
+  width: min(420px, 100%);
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid #d5dacb;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.22);
+  }
+}
