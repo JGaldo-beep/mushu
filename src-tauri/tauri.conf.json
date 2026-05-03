@@ -15,15 +15,17 @@
       {
         "label": "main",
         "title": "mushu",
-        "width": 800,
-        "height": 600
+        "width": 920,
+        "height": 680,
+        "minWidth": 820,
+        "minHeight": 560
       },
       {
         "label": "overlay",
         "title": "",
         "url": "overlay.html",
-        "width": 148,
-        "height": 44,
+        "width": 440,
+        "height": 260,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

@@ -3,16 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title></title>
+    <title>overlay</title>
     <style>
       html,
       body {
         width: 100%;
         height: 100%;
         margin: 0;
-        padding: 0;
         overflow: hidden;
         background: transparent;
+        font-family: Inter, "Segoe UI", system-ui, sans-serif;
       }
 
       body {
@@ -20,77 +20,467 @@
         align-items: center;
         justify-content: center;
         user-select: none;
+        padding: 0;
       }
 
+      /* Ancho al contenido: con solo 3 puntos la cápsula no ocupa toda la ventana */
       .pill {
-        width: 100%;
-        height: 100%;
+        width: fit-content;
+        max-width: 100%;
+        min-width: 0;
+        margin-inline: auto;
+        height: fit-content;
+        max-height: 100%;
+        border-radius: 999px;
+        background: rgba(12, 12, 12, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        display: grid;
+        align-items: center;
+        align-content: center;
+        padding: 4px 9px;
+        box-sizing: border-box;
+        transition: padding 0.22s ease, border-color 0.22s ease, box-shadow 0.28s ease,
+          border-radius 0.25s ease, width 0.25s ease, max-width 0.25s ease;
+      }
+
+      /* Respuesta Mushu / traducción: tarjeta ancha y legible */
+      .pill.has-mushu-reply {
+        width: min(100%, 408px);
+        max-width: min(100%, 408px);
+        border-radius: 14px;
+        padding: 8px 10px 10px;
+        align-items: stretch;
+      }
+
+      .mushu-brand {
+        display: none;
+        font-size: 12px;
+        font-weight: 600;
+        color: #ececec;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+        align-self: center;
+      }
+
+      .pill.has-mushu-reply .mushu-brand {
+        display: block;
+      }
+
+      .pill.has-mushu-reply #modeRow,
+      .pill.has-mushu-reply .wave-slot {
+        display: none !important;
+      }
+
+      .pill.has-mushu-reply .row {
+        justify-content: flex-start;
+        min-height: 1.25em;
+      }
+
+      .pill.is-processing {
+        padding: 3px 8px;
+        box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.1), 0 4px 14px rgba(0, 0, 0, 0.28);
+      }
+
+      /* Mientras procesa: sin modo ni icono; solo puntos (refuerzo + JS por si el WebView ignora reglas). */
+      .pill.is-processing #modeRow,
+      .pill.is-processing .mode {
+        display: none !important;
+      }
+
+      .pill.is-processing .row {
+        justify-content: center;
+      }
+
+      .pill.is-processing .wave-slot {
+        justify-content: center;
+      }
+
+      .row {
         display: flex;
         align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        min-height: 0;
+      }
+
+      /* Misma celda que la onda: pensando no va debajo, va aquí tras desvanecer la onda */
+      .wave-slot {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        min-width: 0;
+        flex-shrink: 0;
+      }
+
+      .pill.is-processing:not(.show-thinking) .wave {
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.22s ease;
+      }
+
+      .pill.is-processing.show-thinking .wave {
+        display: none;
+      }
+
+      .thinking-inline {
+        display: none;
+        align-items: center;
         justify-content: center;
+        gap: 0;
+        opacity: 0;
+      }
+
+      .pill.is-processing.show-thinking .thinking-inline {
+        display: inline-flex;
+        opacity: 1;
+        transition: opacity 0.28s ease 0.05s;
+      }
+
+      .mode {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 10px;
+        font-weight: 500;
+        color: #fff;
+        white-space: nowrap;
+        transition: color 0.2s ease;
+      }
+
+      .mode.mode-updated {
+        animation: mode-pop 0.45s ease;
+      }
+
+      @keyframes mode-pop {
+        0% {
+          transform: scale(1);
+        }
+        40% {
+          transform: scale(1.04);
+        }
+        100% {
+          transform: scale(1);
+        }
+      }
+
+      .icon {
+        width: 7px;
+        height: 7px;
         border-radius: 999px;
-        background: rgba(15, 15, 15, 0.92);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
+        background: #fff;
+        flex-shrink: 0;
       }
 
       .wave {
         display: flex;
         align-items: center;
-        justify-content: center;
-        gap: 6px;
-        height: 22px;
+        gap: 2px;
+        max-height: 15px;
+        opacity: 1;
+        transition: opacity 0.22s ease, max-height 0.24s ease;
       }
 
       .bar {
-        width: 4px;
-        height: 6px;
-        border-radius: 999px;
-        background: #ffffff;
-        opacity: 0.95;
+        width: 2px;
+        height: 7px;
+        border-radius: 99px;
+        background: #fff;
         transform-origin: center;
-        transform: scaleY(0.5);
-        will-change: transform;
+        transform: scaleY(0.35);
       }
+
+      .preview {
+        margin: 0;
+        padding: 0;
+        color: #d1d1d1;
+        font-size: 10px;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        opacity: 0;
+        transition: opacity 200ms ease, margin-top 0.2s ease, max-height 0.22s ease;
+        max-height: 0;
+        overflow: hidden;
+      }
+
+      .preview:not(:empty) {
+        margin-top: 2px;
+        max-height: 80px;
+      }
+
+      .preview.mushu:not(:empty) {
+        white-space: normal;
+        font-size: 12px;
+        line-height: 1.55;
+        letter-spacing: 0.01em;
+        color: #ececec;
+        max-height: min(178px, 52vh);
+        min-height: 2.5em;
+        overflow-y: auto;
+        overflow-x: hidden;
+        text-overflow: unset;
+        margin-top: 8px;
+        padding: 10px 12px;
+        background: rgba(24, 24, 24, 0.97);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        box-sizing: border-box;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+      }
+
+      .preview.mushu:not(:empty)::-webkit-scrollbar {
+        width: 7px;
+      }
+
+      .preview.mushu:not(:empty)::-webkit-scrollbar-track {
+        background: transparent;
+        margin: 4px 0;
+      }
+
+      .preview.mushu:not(:empty)::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.22);
+        border-radius: 99px;
+      }
+
+      .preview.mushu:not(:empty)::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.32);
+      }
+
+      .think-dots {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+      }
+
+      .think-dot {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: #4ade80;
+        box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.35);
+        animation: think-breathe 1.35s ease-in-out infinite;
+      }
+
+      .think-dot:nth-child(1) {
+        animation-delay: 0ms;
+      }
+
+      .think-dot:nth-child(2) {
+        animation-delay: 160ms;
+      }
+
+      .think-dot:nth-child(3) {
+        animation-delay: 320ms;
+      }
+
+      @keyframes think-breathe {
+        0%,
+        100% {
+          transform: scale(0.82);
+          opacity: 0.45;
+          box-shadow: 0 0 0 0 rgba(74, 222, 128, 0);
+        }
+
+        50% {
+          transform: scale(1.08);
+          opacity: 1;
+          box-shadow: 0 0 6px 1px rgba(74, 222, 128, 0.28);
+        }
+      }
+
     </style>
   </head>
   <body>
-    <div class="pill" aria-label="Recording">
-      <div class="wave" aria-hidden="true">
-        <span class="bar"></span>
-        <span class="bar"></span>
-        <span class="bar"></span>
-        <span class="bar"></span>
-        <span class="bar"></span>
+    <div id="pill" class="pill">
+      <div class="row">
+        <span class="mushu-brand">Mushu:</span>
+        <div id="modeRow" class="mode">
+          <span id="modeIcon" class="icon"></span><span id="modeText">Modo general</span>
+        </div>
+        <div id="waveSlot" class="wave-slot">
+          <div class="wave">
+            <span class="bar"></span>
+            <span class="bar"></span>
+            <span class="bar"></span>
+            <span class="bar"></span>
+            <span class="bar"></span>
+          </div>
+          <div
+            id="thinkingInline"
+            class="thinking-inline"
+            aria-hidden="true"
+            role="status"
+            aria-label="Procesando"
+          ></div>
+        </div>
       </div>
+      <div id="preview" class="preview"></div>
     </div>
     <script>
       const bars = Array.from(document.querySelectorAll(".bar"));
       const current = bars.map(() => 0);
+      const modeText = document.getElementById("modeText");
+      const modeIcon = document.getElementById("modeIcon");
+      const preview = document.getElementById("preview");
+      const pill = document.getElementById("pill");
+      const modeRow = document.getElementById("modeRow");
+      const thinkingInline = document.getElementById("thinkingInline");
       let target = 0;
+      let thinkPhaseTimer = null;
+      const THINK_AFTER_WAVE_MS = 260;
+
+      function cancelThinkPhase() {
+        if (thinkPhaseTimer) {
+          clearTimeout(thinkPhaseTimer);
+          thinkPhaseTimer = null;
+        }
+      }
+
+      function stopThinkingInline() {
+        if (thinkingInline) {
+          thinkingInline.innerHTML = "";
+          thinkingInline.setAttribute("aria-hidden", "true");
+        }
+        if (pill) pill.classList.remove("show-thinking");
+      }
+
+      function setModeRowProcessingHidden(hidden) {
+        if (!modeRow) return;
+        modeRow.style.display = hidden ? "none" : "";
+      }
+
+      function stopThinking() {
+        cancelThinkPhase();
+        stopThinkingInline();
+        preview.innerHTML = "";
+        preview.classList.remove("thinking", "mushu");
+        if (pill) pill.classList.remove("has-mushu-reply");
+      }
+
+      function startThinkingInline() {
+        stopThinkingInline();
+        if (!thinkingInline || !pill) return;
+        pill.classList.add("show-thinking");
+        thinkingInline.innerHTML =
+          '<div class="think-dots">' +
+          '<span class="think-dot"></span><span class="think-dot"></span><span class="think-dot"></span>' +
+          "</div>";
+        thinkingInline.setAttribute("aria-hidden", "false");
+      }
+
+      /** Onda desaparece primero; tras un breve hueco aparece pensando en la misma columna (no debajo). */
+      function beginProcessing() {
+        cancelThinkPhase();
+        stopThinkingInline();
+        preview.innerHTML = "";
+        preview.classList.remove("thinking", "mushu");
+        if (pill) pill.classList.remove("has-mushu-reply");
+        setModeRowProcessingHidden(true);
+        if (pill) {
+          pill.classList.remove("show-thinking");
+          pill.classList.add("is-processing");
+        }
+        thinkPhaseTimer = setTimeout(() => {
+          thinkPhaseTimer = null;
+          if (pill && pill.classList.contains("is-processing")) {
+            startThinkingInline();
+          }
+        }, THINK_AFTER_WAVE_MS);
+      }
 
       function tick() {
         const now = performance.now();
         bars.forEach((bar, i) => {
-          const phase = i * 0.55;
-          const wobble = Math.sin(now / 160 + phase) * 0.5 + 0.5;
+          const wobble = Math.sin(now / 180 + i * 0.45) * 0.5 + 0.5;
           const responsive = target * (0.45 + 0.55 * wobble);
-          current[i] += (responsive - current[i]) * 0.28;
-          const scale = 0.5 + current[i] * 3.2;
-          bar.style.transform = `scaleY(${scale})`;
+          current[i] += (responsive - current[i]) * 0.22;
+          bar.style.transform = `scaleY(${0.35 + current[i] * 2.9})`;
         });
         requestAnimationFrame(tick);
       }
       tick();
 
+      function setMode(mode) {
+        if (!mode) return;
+        const label = mode.label || mode.name || "DEFAULT";
+        modeText.textContent = label;
+        modeText.style.color = mode.color || "#fff";
+        modeIcon.style.background = mode.color || "#fff";
+      }
+
+      function flashModeRow() {
+        if (!modeRow) return;
+        modeRow.classList.remove("mode-updated");
+        void modeRow.offsetWidth;
+        modeRow.classList.add("mode-updated");
+        setTimeout(() => modeRow.classList.remove("mode-updated"), 500);
+      }
+
       function attachListener() {
         if (window.__TAURI__ && window.__TAURI__.event) {
+          window.__TAURI__.event.listen("recording_started", (event) => {
+            stopThinking();
+            if (pill) pill.classList.remove("is-processing", "show-thinking", "has-mushu-reply");
+            setModeRowProcessingHidden(false);
+            setMode(event.payload);
+            preview.innerHTML = "";
+            preview.style.opacity = "0";
+          });
+          window.__TAURI__.event.listen("dictation_processing", (event) => {
+            const active = event.payload && event.payload.active === true;
+            if (active) {
+              beginProcessing();
+            } else {
+              if (pill) pill.classList.remove("is-processing", "show-thinking");
+              /* No mostrar de nuevo "Modo …" hasta la próxima grabación: evita el flash tras los puntos */
+              stopThinking();
+            }
+          });
+          window.__TAURI__.event.listen("mode_changed", (event) => {
+            setMode(event.payload);
+            flashModeRow();
+          });
           window.__TAURI__.event.listen("audio_level", (event) => {
             const level = typeof event.payload === "number" ? event.payload : 0;
             target = Math.min(1, level * 12);
           });
           window.__TAURI__.event.listen("recording_stopped", () => {
             target = 0;
+          });
+          window.__TAURI__.event.listen("transcription_done", (event) => {
+            target = 0;
+            stopThinking();
+            const payload = event.payload || {};
+            if (payload.mode) setMode(payload.mode);
+            preview.innerHTML = "";
+            preview.classList.remove("mushu", "thinking");
+            preview.style.opacity = "0";
+          });
+          window.__TAURI__.event.listen("mushu_reply", (event) => {
+            target = 0;
+            stopThinking();
+            const t = (event.payload && event.payload.text) || "";
+            preview.innerHTML = "";
+            preview.classList.add("mushu");
+            preview.classList.remove("thinking");
+            if (pill) pill.classList.add("has-mushu-reply");
+            preview.textContent = String(t).slice(0, 2800);
+            preview.style.opacity = "1";
+            setTimeout(() => {
+              preview.style.opacity = "0";
+              if (pill) pill.classList.remove("has-mushu-reply");
+            }, 7200);
+          });
+          window.__TAURI__.event.listen("mode_switch_ok", (event) => {
+            target = 0;
+            stopThinking();
+            const p = event.payload || {};
+            setMode(p);
+            flashModeRow();
+            preview.innerHTML = "";
+            preview.classList.remove("mushu", "thinking");
+            preview.style.opacity = "0";
           });
         } else {
           setTimeout(attachListener, 50);
