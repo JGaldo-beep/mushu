@@ -112,6 +112,15 @@
         flex-shrink: 0;
       }
 
+      /* Solo cambio de modo (atajo): sin onda ni “puntos” a la derecha */
+      .pill.mode-banner-only .wave-slot {
+        display: none !important;
+      }
+
+      .pill.mode-banner-only .row {
+        justify-content: center;
+      }
+
       .pill.is-processing:not(.show-thinking) .wave {
         opacity: 0;
         pointer-events: none;
@@ -421,15 +430,28 @@
         if (window.__TAURI__ && window.__TAURI__.event) {
           window.__TAURI__.event.listen("recording_started", (event) => {
             stopThinking();
-            if (pill) pill.classList.remove("is-processing", "show-thinking", "has-mushu-reply");
+            if (pill)
+              pill.classList.remove(
+                "is-processing",
+                "show-thinking",
+                "has-mushu-reply",
+                "mode-banner-only",
+              );
             setModeRowProcessingHidden(false);
             setMode(event.payload);
             preview.innerHTML = "";
             preview.style.opacity = "0";
           });
+          window.__TAURI__.event.listen("overlay_mode_banner", (event) => {
+            const active = event.payload && event.payload.active === true;
+            if (!pill) return;
+            if (active) pill.classList.add("mode-banner-only");
+            else pill.classList.remove("mode-banner-only");
+          });
           window.__TAURI__.event.listen("dictation_processing", (event) => {
             const active = event.payload && event.payload.active === true;
             if (active) {
+              if (pill) pill.classList.remove("mode-banner-only");
               beginProcessing();
             } else {
               if (pill) pill.classList.remove("is-processing", "show-thinking");

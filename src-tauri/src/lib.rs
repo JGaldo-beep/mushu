@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::io::copy;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{thread, vec};
@@ -29,10 +29,28 @@ const WHISPER_MODEL_URL: &str =
 const WHISPER_MODEL_FILE: &str = "ggml-base.bin";
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 const DEFAULT_HOTKEY: &str = "Ctrl+Space";
+const DEFAULT_MODE_HOTKEY: &str = "Ctrl+Shift+Space";
 const DEFAULT_MODEL: &str = "llama-3.1-8b-instant";
+const ALLOWED_GROQ_MODELS: [&str; 2] = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
 const KEYRING_SERVICE: &str = "com.antonio.mushu";
 const KEYRING_USER: &str = "groq_api_key";
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ProcessingMode {
+    CloudFirst,
+    LocalOnly,
+}
+
+impl ProcessingMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CloudFirst => "cloud_first",
+            Self::LocalOnly => "local_only",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -125,7 +143,11 @@ impl From<Mode> for ModeInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppSettings {
     hotkey: String,
+    #[serde(default = "default_mode_hotkey")]
+    mode_hotkey: String,
     model: String,
+    #[serde(default)]
+    processing_mode: ProcessingMode,
     mode: Mode,
     microphone: Option<String>,
 }
@@ -134,18 +156,32 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             hotkey: DEFAULT_HOTKEY.to_string(),
+            mode_hotkey: default_mode_hotkey(),
             model: DEFAULT_MODEL.to_string(),
+            processing_mode: ProcessingMode::CloudFirst,
             mode: Mode::Default,
             microphone: None,
         }
     }
 }
 
+impl Default for ProcessingMode {
+    fn default() -> Self {
+        Self::CloudFirst
+    }
+}
+
+fn default_mode_hotkey() -> String {
+    DEFAULT_MODE_HOTKEY.to_string()
+}
+
 #[derive(Serialize)]
 struct FrontendState {
     mode: ModeInfo,
     hotkey: String,
+    mode_hotkey: String,
     model: String,
+    processing_mode: String,
     has_groq_key: bool,
     microphones: Vec<String>,
     selected_microphone: Option<String>,
@@ -164,7 +200,9 @@ struct HistoryItem {
 #[derive(Deserialize)]
 struct SaveSettingsInput {
     hotkey: String,
+    mode_hotkey: String,
     model: String,
+    processing_mode: ProcessingMode,
     microphone: Option<String>,
 }
 
@@ -179,6 +217,8 @@ struct GroqRequest {
     model: String,
     temperature: f32,
     messages: Vec<GroqMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +249,8 @@ struct TrayState {
 
 struct AppState {
     is_recording: AtomicBool,
+    /// Incrementa en cada flash de overlay por cambio de modo; evita que un timer viejo oculte tras varios toques.
+    mode_overlay_flash_gen: AtomicU64,
     recording_started_at: Mutex<Option<Instant>>,
     audio_buffer: Mutex<Vec<f32>>,
     audio_device: Mutex<AudioDevice>,
@@ -240,7 +282,9 @@ fn get_frontend_state(state: tauri::State<'_, AppState>) -> Result<FrontendState
     Ok(FrontendState {
         mode: ModeInfo::from(settings.mode),
         hotkey: settings.hotkey,
+        mode_hotkey: settings.mode_hotkey,
         model: settings.model,
+        processing_mode: settings.processing_mode.as_str().to_string(),
         has_groq_key: load_groq_api_key(&state).is_ok(),
         microphones: list_input_devices()?,
         selected_microphone: settings.microphone,
@@ -253,7 +297,14 @@ fn save_settings(
     state: tauri::State<'_, AppState>,
     input: SaveSettingsInput,
 ) -> Result<FrontendState, String> {
-    let parsed = parse_shortcut(&input.hotkey)?;
+    let parsed_dictation = parse_shortcut(&input.hotkey)?;
+    let parsed_mode = parse_shortcut(&input.mode_hotkey)?;
+    if parsed_dictation == parsed_mode {
+        return Err("El atajo de dictado y el atajo de cambio de modo deben ser distintos.".to_string());
+    }
+    validate_model(&input.model)?;
+    let dictation_hotkey_text = input.hotkey.clone();
+    let mode_hotkey_text = input.mode_hotkey.clone();
     let previous_mic = {
         let settings = state
             .settings
@@ -266,9 +317,12 @@ fn save_settings(
         .settings
         .lock()
         .map_err(|_| "No se pudo bloquear settings".to_string())?;
-    let previous = settings.hotkey.clone();
+    let previous_hotkey = settings.hotkey.clone();
+    let previous_mode_hotkey = settings.mode_hotkey.clone();
     settings.hotkey = input.hotkey;
+    settings.mode_hotkey = input.mode_hotkey;
     settings.model = input.model;
+    settings.processing_mode = input.processing_mode;
     settings.microphone = input.microphone;
     save_settings_file(&app, &settings)?;
     let target_mic = settings.microphone.clone();
@@ -289,11 +343,25 @@ fn save_settings(
     }
 
     app.global_shortcut()
-        .unregister(parse_shortcut(&previous)?)
+        .unregister(parse_shortcut(&previous_hotkey)?)
         .map_err(|e| e.to_string())?;
     app.global_shortcut()
-        .register(parsed)
+        .unregister(parse_shortcut(&previous_mode_hotkey)?)
         .map_err(|e| e.to_string())?;
+    app.global_shortcut()
+        .register(parsed_dictation)
+        .map_err(|e| {
+            map_shortcut_register_error(e.to_string(), &dictation_hotkey_text, "de dictado")
+        })?;
+    app.global_shortcut()
+        .register(parsed_mode)
+        .map_err(|e| {
+            map_shortcut_register_error(
+                e.to_string(),
+                &mode_hotkey_text,
+                "de cambio de modo",
+            )
+        })?;
     get_frontend_state(state)
 }
 
@@ -321,15 +389,6 @@ fn save_groq_api_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
         let _ = entry.set_password(&trimmed);
     }
     Ok(())
-}
-
-#[tauri::command]
-fn set_mode(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    mode: Mode,
-) -> Result<(), String> {
-    update_mode(&app, &state, mode, true)
 }
 
 #[tauri::command]
@@ -435,22 +494,6 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
             return;
         }
 
-        if let Some(trigger_mode) = detect_mode_trigger(&raw_text) {
-            if let Err(err) = update_mode(&app_handle, &state, trigger_mode, true) {
-                emit_dictation_processing(&app_handle, false);
-                let _ = app_handle.emit("transcription_error", err);
-                let _ = hide_overlay(&app_handle);
-                return;
-            }
-            emit_dictation_processing(&app_handle, false);
-            let _ = app_handle.emit(
-                "mode_switch_ok",
-                ModeInfo::from(trigger_mode),
-            );
-            let _ = hide_overlay(&app_handle);
-            return;
-        }
-
         let settings = match state.settings.lock() {
             Ok(s) => s.clone(),
             Err(_) => {
@@ -460,6 +503,20 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
                 return;
             }
         };
+
+        if settings.processing_mode == ProcessingMode::LocalOnly
+            && (settings.mode == Mode::Help
+                || settings.mode == Mode::ReplyEn
+                || settings.mode == Mode::Translate)
+        {
+            emit_dictation_processing(&app_handle, false);
+            let _ = app_handle.emit(
+                "transcription_error",
+                "Este modo requiere nube (Groq). Cambia 'Modo de procesamiento' a 'Nube primero'.",
+            );
+            let _ = hide_overlay(&app_handle);
+            return;
+        }
 
         if settings.mode == Mode::Help {
             match mushu_assistant_reply(&state, &raw_text).await {
@@ -594,6 +651,15 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
         }
 
         if let Some(question) = detect_pregunta_mushu(&raw_text) {
+            if settings.processing_mode == ProcessingMode::LocalOnly {
+                emit_dictation_processing(&app_handle, false);
+                let _ = app_handle.emit(
+                    "transcription_error",
+                    "Pregunta Mushu requiere nube (Groq). Activa 'Nube primero' para usarlo.",
+                );
+                let _ = hide_overlay(&app_handle);
+                return;
+            }
             match mushu_assistant_reply(&state, &question).await {
                 Ok(reply) => {
                     emit_dictation_processing(&app_handle, false);
@@ -612,12 +678,20 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
             return;
         }
 
-        let processed_text = match transform_with_mode(&state, settings.mode, &settings.model, &raw_text).await {
-            Ok(text) => text,
-            Err(err) => {
-                let _ = app_handle.emit("groq_error", &err);
-                raw_text.clone()
+        let processed_text = match settings.processing_mode {
+            ProcessingMode::CloudFirst => {
+                match transform_with_mode(&state, settings.mode, &settings.model, &raw_text).await {
+                    Ok(text) => text,
+                    Err(err) => {
+                        let _ = app_handle.emit(
+                            "groq_error",
+                            format!("{err}. Fallback local aplicado (texto sin transformación)."),
+                        );
+                        raw_text.clone()
+                    }
+                }
             }
+            ProcessingMode::LocalOnly => raw_text.clone(),
         };
 
         if let Err(e) = paste_text(&processed_text) {
@@ -697,6 +771,7 @@ async fn transform_with_mode(
     model: &str,
     raw_text: &str,
 ) -> Result<String, String> {
+    validate_model(model)?;
     let key = load_groq_api_key(state)?;
     let prompt = format!(
         "{}\n\nTexto: {}\n\nDevuelve ÚNICAMENTE el texto transformado, sin explicaciones, sin comillas, sin prefijos.",
@@ -716,6 +791,7 @@ async fn transform_with_mode(
                 content: prompt,
             },
         ],
+        max_tokens: None,
     };
     let response = tokio::time::timeout(
         Duration::from_secs(5),
@@ -750,6 +826,7 @@ async fn test_groq(state: tauri::State<'_, AppState>) -> Result<String, String> 
         .map_err(|_| "No se pudo bloquear settings".to_string())?
         .model
         .clone();
+    validate_model(&model)?;
     let req = GroqRequest {
         model: model.clone(),
         temperature: 0.0,
@@ -757,6 +834,7 @@ async fn test_groq(state: tauri::State<'_, AppState>) -> Result<String, String> 
             role: "user".to_string(),
             content: "Responde solo: OK".to_string(),
         }],
+        max_tokens: None,
     };
     let response = tokio::time::timeout(
         Duration::from_secs(5),
@@ -837,47 +915,6 @@ fn normalize_for_triggers(text: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn detect_mode_trigger(text: &str) -> Option<Mode> {
-    let n = normalize_for_triggers(text);
-    // Triggers de voz (tras normalizar tildes): "modo correo" = email; "modo código" → "modo codigo".
-    if n.contains("modo correo")
-        || n.contains("modo email")
-        || n.contains("modo imail")
-    {
-        return Some(Mode::Email);
-    }
-    if n.contains("modo formal") {
-        return Some(Mode::Formal);
-    }
-    if n.contains("modo casual") {
-        return Some(Mode::Casual);
-    }
-    if n.contains("modo codigo") {
-        return Some(Mode::Code);
-    }
-    if n.contains("modo ayuda") {
-        return Some(Mode::Help);
-    }
-    if n.contains("modo responder")
-        || n.contains("modo responde ingles")
-        || n.contains("modo reply")
-        || n.contains("modo ingles")
-    {
-        return Some(Mode::ReplyEn);
-    }
-    if n.contains("modo traducir") || n.contains("modo translate") {
-        return Some(Mode::Translate);
-    }
-    if n.contains("modo default")
-        || n.contains("modo normal")
-        || n.contains("modo por defecto")
-        || n.contains("modo basico")
-    {
-        return Some(Mode::Default);
-    }
-    None
-}
-
 fn normalize_text(text: &str) -> String {
     text.to_lowercase()
         .nfd()
@@ -898,7 +935,7 @@ fn detect_pregunta_mushu(text: &str) -> Option<String> {
         if let Some(idx) = n.find(needle) {
             let rest = n[idx + needle.len()..].trim();
             let q = if rest.is_empty() {
-                "¿Qué modos tiene Mushu y cómo los cambio con la voz? Responde en pocas frases."
+                "¿Qué modos tiene Mushu y cómo cambio de modo con el teclado? Responde en pocas frases."
                     .to_string()
             } else {
                 rest.to_string()
@@ -917,31 +954,22 @@ async fn mushu_assistant_reply(state: &AppState, user_question: &str) -> Result<
         .map_err(|_| "No se pudo bloquear settings".to_string())?
         .model
         .clone();
-    const SYSTEM: &str = r#"Eres "Mushu", el asistente de voz integrado en la app Mushu (Windows, escritorio Tauri).
-Hablas en primera persona con el usuario. Responde en español, claro y breve (como mucho 5–6 frases cortas). Evita markdown pesado y listas enormes.
+    validate_model(&model)?;
+    const SYSTEM: &str = r#"Eres "Mushu", el asistente de voz de la app Mushu (Windows, Tauri).
+Habla en primera persona, en español. Las respuestas deben ser MUY cortas para leer en un vistazo.
 
-La app: dictado con Whisper en local; opcionalmente reescribe el dictado con Groq según el modo activo.
+FORMATO DE RESPUESTA (obligatorio):
+- Como máximo 2 o 3 frases cortas; idealmente menos de 220 caracteres en total.
+- Sin listas con viñetas, sin numeraciones largas y sin markdown (nada de #, **, tablas).
+- Ve al grano: qué hacer, en qué orden, o la respuesta directa.
 
-MODOS DE DICTADO (si te preguntan qué hay o para qué sirven, explícalos en lenguaje natural con estos nombres):
-- DEFAULT / general: dictado normal con limpieza leve.
-- EMAIL / correo: redacta como correo electrónico.
-- FORMAL: tono formal.
-- CASUAL: tono relajado.
-- CODE: estilo técnico o comentarios de código.
-- HELP / ayuda: cualquier pregunta en ese modo va al asistente sobre Mushu (sin pegar en el documento).
-- REPLY_EN / responder (EN): copia texto en inglés (Ctrl+C), dicta cómo responder; Mushu escribe la respuesta en inglés y la pega.
-- TRANSLATE / traducir: traduce al español solo lo que el usuario dicta (Whisper); resultado en overlay y en el portapapeles.
+CONTEXTO RÁPIDO DE LA APP:
+Dictado local con Whisper; Groq puede reescribir según el modo. Modos: general, correo, formal, casual, código, ayuda (preguntas a ti), responder EN (clipboard en inglés + voz), traducir. El modo solo se cambia con el atajo de teclado configurado para “siguiente modo” (por defecto Ctrl+Shift+Espacio), nunca por frases en el dictado.
 
-Cambio de modo por voz (después de soltar el atajo de dictado): "modo correo" o "modo email", "modo formal", "modo casual", "modo código", "modo ayuda", "modo responder" o "modo inglés", "modo traducir", "modo default" (también "modo normal" o "modo por defecto").
-
-Atajo por defecto: Ctrl+Espacio (configurable en ajustes de la app).
-Las preguntas a Mushu empiezan con frases como "Pregunta Mushu" y no se pegan en el documento activo.
-
-REGLAS OBLIGATORIAS:
-- Responde SIEMPRE de forma directa a lo que el usuario pregunta.
-- PROHIBIDO responder con instrucciones meta para otros sistemas o para ti mismo (ejemplos prohibidos: "Devuelve la lista", "Enumera los modos", "Aquí tienes el prompt", "Lista los modos disponibles" como única respuesta sin contenido útil).
-- Si preguntan qué modos hay o cómo usarlos, responde con la información de MODOS en frases normales, sin rodeos.
-- Si no sabes un dato concreto, dilo en una sola frase."#;
+REGLAS:
+- Responde directo a la pregunta; nada de meta-instrucciones ("aquí tienes", "enumera", "devuelve la lista") sin contenido útil.
+- Si preguntan qué modos hay, resume en una o dos frases los nombres y para qué sirven, sin ensayar.
+- Si no sabes algo, una sola frase honesta."#;
     let user_block = format!(
         "Pregunta del usuario (puede venir de transcripción automática):\n{}",
         user_question.trim()
@@ -959,6 +987,7 @@ REGLAS OBLIGATORIAS:
                 content: user_block,
             },
         ],
+        max_tokens: Some(110),
     };
     let response = tokio::time::timeout(
         Duration::from_secs(12),
@@ -1034,6 +1063,39 @@ fn parse_shortcut(value: &str) -> Result<Shortcut, String> {
     Shortcut::from_str(value).map_err(|e| format!("Hotkey inválida: {e}"))
 }
 
+fn map_shortcut_register_error(raw: String, shortcut_text: &str, label: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("already registered") {
+        return format!(
+            "No se pudo registrar el atajo {label} ({shortcut_text}) porque ya está en uso por otra app o instancia."
+        );
+    }
+    raw
+}
+
+fn validate_model(model: &str) -> Result<(), String> {
+    if ALLOWED_GROQ_MODELS.contains(&model) {
+        return Ok(());
+    }
+    Err(format!(
+        "Modelo no permitido: {model}. Modelos válidos: {}",
+        ALLOWED_GROQ_MODELS.join(", ")
+    ))
+}
+
+fn next_mode(mode: Mode) -> Mode {
+    match mode {
+        Mode::Default => Mode::Email,
+        Mode::Email => Mode::Formal,
+        Mode::Formal => Mode::Casual,
+        Mode::Casual => Mode::Code,
+        Mode::Code => Mode::Help,
+        Mode::Help => Mode::ReplyEn,
+        Mode::ReplyEn => Mode::Translate,
+        Mode::Translate => Mode::Default,
+    }
+}
+
 const CLIPBOARD_GROQ_MAX_CHARS: usize = 12_000;
 
 fn read_clipboard_text() -> Result<String, String> {
@@ -1062,6 +1124,7 @@ async fn groq_english_reply_from_clipboard(
     english_context: &str,
     instruction: &str,
 ) -> Result<String, String> {
+    validate_model(model)?;
     let key = load_groq_api_key(state)?;
     const SYSTEM: &str = r#"Eres un redactor nativo de inglés (EE.UU./Reino Unido neutro).
 El usuario pega CONTEXT en inglés (p. ej. un post o comentario de Reddit) y dicta en español o inglés CÓMO quiere responder.
@@ -1082,6 +1145,7 @@ Tu salida debe ser ÚNICAMENTE el texto final de la respuesta en inglés, listo 
                 content: user,
             },
         ],
+        max_tokens: None,
     };
     let response = tokio::time::timeout(
         Duration::from_secs(10),
@@ -1111,6 +1175,7 @@ async fn groq_translate_to_spanish(
     model: &str,
     text: &str,
 ) -> Result<String, String> {
+    validate_model(model)?;
     let key = load_groq_api_key(state)?;
     const SYSTEM: &str = r#"El usuario dictó un texto (transcripción automática); puede estar en inglés u otro idioma.
 Tradúcelo al español natural (España o latino neutro según el original).
@@ -1128,6 +1193,7 @@ Devuelve ÚNICAMENTE la traducción, sin comillas, sin prefijos, sin notas."#;
                 content: text.to_string(),
             },
         ],
+        max_tokens: None,
     };
     let response = tokio::time::timeout(
         Duration::from_secs(10),
@@ -1200,9 +1266,31 @@ fn load_settings_file(app: &tauri::AppHandle) -> AppSettings {
         return AppSettings::default();
     };
     match fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str::<AppSettings>(&raw).unwrap_or_default(),
+        Ok(raw) => {
+            let parsed = serde_json::from_str::<AppSettings>(&raw).unwrap_or_default();
+            normalize_settings(parsed)
+        }
         Err(_) => AppSettings::default(),
     }
+}
+
+fn normalize_settings(mut settings: AppSettings) -> AppSettings {
+    if parse_shortcut(&settings.hotkey).is_err() {
+        settings.hotkey = DEFAULT_HOTKEY.to_string();
+    }
+    if parse_shortcut(&settings.mode_hotkey).is_err() {
+        settings.mode_hotkey = default_mode_hotkey();
+    }
+    if settings.hotkey == settings.mode_hotkey {
+        settings.mode_hotkey = default_mode_hotkey();
+        if settings.hotkey == settings.mode_hotkey {
+            settings.mode_hotkey = "Ctrl+Alt+Space".to_string();
+        }
+    }
+    if validate_model(&settings.model).is_err() {
+        settings.model = DEFAULT_MODEL.to_string();
+    }
+    settings
 }
 
 fn save_settings_file(app: &tauri::AppHandle, settings: &AppSettings) -> Result<(), String> {
@@ -1475,9 +1563,45 @@ fn hide_overlay(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Muestra la píldora (overlay) al cambiar modo con atajo; la oculta tras un breve tiempo si no hay grabación.
+fn show_mode_change_overlay(app: &tauri::AppHandle, state: &AppState) {
+    emit_dictation_processing(app, false);
+    let _ = show_overlay(app);
+    emit_overlay_mode_banner(app, true);
+    let gen = state
+        .mode_overlay_flash_gen
+        .fetch_add(1, Ordering::AcqRel)
+        .saturating_add(1);
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1800)).await;
+        let Some(inner) = app_clone.try_state::<AppState>() else {
+            return;
+        };
+        if inner.mode_overlay_flash_gen.load(Ordering::Acquire) != gen {
+            return;
+        }
+        if inner.is_recording.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = app_clone.emit(
+            "overlay_mode_banner",
+            serde_json::json!({ "active": false }),
+        );
+        let _ = hide_overlay(&app_clone);
+    });
+}
+
 fn emit_dictation_processing(app: &tauri::AppHandle, active: bool) {
     let _ = app.emit(
         "dictation_processing",
+        serde_json::json!({ "active": active }),
+    );
+}
+
+fn emit_overlay_mode_banner(app: &tauri::AppHandle, active: bool) {
+    let _ = app.emit(
+        "overlay_mode_banner",
         serde_json::json!({ "active": active }),
     );
 }
@@ -1555,17 +1679,47 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(|app, shortcut, event| {
                     let state = app.state::<AppState>();
-                    match event.state() {
-                        ShortcutState::Pressed => {
-                            let _ = do_start_recording(&state, app);
+                    let (dictation_shortcut, mode_shortcut, current_mode) = {
+                        let settings = match state.settings.lock() {
+                            Ok(settings) => settings.clone(),
+                            Err(_) => return,
+                        };
+                        let dictation = parse_shortcut(&settings.hotkey).ok();
+                        let mode = parse_shortcut(&settings.mode_hotkey).ok();
+                        (dictation, mode, settings.mode)
+                    };
+
+                    if let Some(configured) = dictation_shortcut {
+                        if configured == *shortcut {
+                            match event.state() {
+                                ShortcutState::Pressed => {
+                                    let _ = do_start_recording(&state, app);
+                                }
+                                ShortcutState::Released => {
+                                    // Procesando antes de "recording_stopped": la UI pasa a pensar sin mezclar con la onda.
+                                    emit_dictation_processing(app, true);
+                                    let _ = do_stop_recording(&state, app);
+                                    process_hotkey_release(app);
+                                }
+                            }
+                            return;
                         }
-                        ShortcutState::Released => {
-                            // Procesando antes de "recording_stopped": la UI pasa a pensar sin mezclar con la onda.
-                            emit_dictation_processing(app, true);
-                            let _ = do_stop_recording(&state, app);
-                            process_hotkey_release(app);
+                    }
+
+                    if let Some(configured) = mode_shortcut {
+                        if configured == *shortcut && event.state() == ShortcutState::Released {
+                            if state.is_recording.load(Ordering::Acquire) {
+                                return;
+                            }
+                            let target_mode = next_mode(current_mode);
+                            if let Err(err) = update_mode(app, &state, target_mode, true) {
+                                let _ = app.emit("transcription_error", err);
+                                return;
+                            }
+                            show_mode_change_overlay(app, &state);
+                            let _ = app.emit("mode_switch_ok", ModeInfo::from(target_mode));
                         }
                     }
                 })
@@ -1585,6 +1739,7 @@ pub fn run() {
             let db = tauri::async_runtime::block_on(init_db(&app_handle))?;
             let state = AppState {
                 is_recording: AtomicBool::new(false),
+                mode_overlay_flash_gen: AtomicU64::new(0),
                 recording_started_at: Mutex::new(None),
                 audio_buffer: Mutex::new(Vec::new()),
                 audio_device: Mutex::new(audio_device),
@@ -1600,7 +1755,22 @@ pub fn run() {
             app.handle()
                 .global_shortcut()
                 .register(parse_shortcut(&settings.hotkey)?)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    map_shortcut_register_error(e.to_string(), &settings.hotkey, "de dictado")
+                })?;
+            let mode_parsed = parse_shortcut(&settings.mode_hotkey)?;
+            if let Err(e) = app.handle()
+                .global_shortcut()
+                .register(mode_parsed)
+            {
+                // No bloqueamos el arranque si el atajo de cambio de modo está ocupado por otra app.
+                let msg = map_shortcut_register_error(
+                    e.to_string(),
+                    &settings.mode_hotkey,
+                    "de cambio de modo",
+                );
+                eprintln!("{msg}");
+            }
 
             if let Some(main) = app.get_webview_window("main") {
                 let main_window = main.clone();
@@ -1620,7 +1790,6 @@ pub fn run() {
             save_settings,
             save_groq_api_key,
             test_groq,
-            set_mode,
             get_history,
             clear_history,
             copy_to_clipboard

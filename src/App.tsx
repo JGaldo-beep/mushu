@@ -45,7 +45,9 @@ type ModeInfo = {
 type FrontendState = {
   mode: ModeInfo;
   hotkey: string;
+  mode_hotkey: string;
   model: string;
+  processing_mode: "cloud_first" | "local_only";
   has_groq_key: boolean;
   microphones: string[];
   selected_microphone: string | null;
@@ -93,17 +95,6 @@ const modeLabelMap: Record<ModeName, string> = {
   TRANSLATE: "Modo traducir",
 };
 
-const ALL_MODES: ModeName[] = [
-  "DEFAULT",
-  "EMAIL",
-  "FORMAL",
-  "CASUAL",
-  "CODE",
-  "HELP",
-  "REPLY_EN",
-  "TRANSLATE",
-];
-
 function App() {
   const [recording, setRecording] = useState(false);
   const [mode, setMode] = useState<ModeInfo>({
@@ -113,7 +104,9 @@ function App() {
     icon: "Mic",
   });
   const [hotkey, setHotkey] = useState("Ctrl+Space");
+  const [modeHotkey, setModeHotkey] = useState("Ctrl+Shift+Space");
   const [model, setModel] = useState("llama-3.1-8b-instant");
+  const [processingMode, setProcessingMode] = useState<"cloud_first" | "local_only">("cloud_first");
   const [groqKey, setGroqKey] = useState("");
   const [hasGroqKey, setHasGroqKey] = useState(false);
   const [microphones, setMicrophones] = useState<string[]>([]);
@@ -138,7 +131,9 @@ function App() {
       label: m.label || modeLabelMap[m.name as ModeName] || m.name,
     });
     setHotkey(state.hotkey);
+    setModeHotkey(state.mode_hotkey);
     setModel(state.model);
+    setProcessingMode(state.processing_mode);
     setHasGroqKey(state.has_groq_key);
     setMicrophones(state.microphones ?? []);
     setMicrophone(state.selected_microphone ?? "");
@@ -245,7 +240,13 @@ function App() {
         setHasGroqKey(true);
       }
       await invoke("save_settings", {
-        input: { hotkey, model, microphone: microphone || null },
+        input: {
+          hotkey,
+          mode_hotkey: modeHotkey,
+          model,
+          processing_mode: processingMode,
+          microphone: microphone || null,
+        },
       });
       setStatus("Configuración guardada.");
       await refreshState();
@@ -276,32 +277,6 @@ function App() {
     }
   };
 
-  const iconForMode = (m: ModeName): ModeInfo["icon"] => {
-    if (m === "EMAIL") return "Mail";
-    if (m === "FORMAL") return "BriefcaseBusiness";
-    if (m === "CASUAL") return "MessageCircle";
-    if (m === "CODE") return "Code2";
-    if (m === "HELP") return "CircleHelp";
-    if (m === "REPLY_EN") return "MessageSquareReply";
-    if (m === "TRANSLATE") return "Languages";
-    return "Mic";
-  };
-
-  const selectMode = async (target: ModeName) => {
-    try {
-      setError("");
-      await invoke("set_mode", { mode: target });
-      setMode({
-        name: target,
-        label: modeLabelMap[target],
-        color: modeColorMap[target],
-        icon: iconForMode(target),
-      });
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
   const clear = async () => {
     await invoke("clear_history");
     await refreshHistory();
@@ -324,25 +299,16 @@ function App() {
         </div>
         <p className="status">{status}</p>
         {error && <p className="error">{error}</p>}
-        <div className="mode-grid" role="group" aria-label="Modo de dictado">
-          {ALL_MODES.map((m) => (
-            <button
-              key={m}
-              type="button"
-              className={`mode-btn ${mode.name === m ? "active" : ""}`}
-              onClick={() => selectMode(m)}
-              aria-pressed={mode.name === m}
-              title={m}
-            >
-              {modeLabelMap[m].replace(/^Modo /, "")}
-            </button>
-          ))}
-        </div>
         <p className="mode-hint">
+          <strong>Modo activo</strong> solo cambia con el atajo <strong>{modeHotkey}</strong> (no por voz ni
+          palabras como “modo …”).
+          <br />
           <strong>Ayuda:</strong> cualquier dictado → respuesta sobre Mushu (overlay).{" "}
           <strong>Responder (EN):</strong> copia el texto en inglés (Ctrl+C), dicta cómo quieres
           responder → se pega en inglés.           <strong>Traducir:</strong> dicta el texto (cualquier idioma) → español en overlay y
           portapapeles.
+          <br />
+          <strong>Atajos:</strong> Dictado: {hotkey} · Siguiente modo: {modeHotkey}
         </p>
       </section>
 
@@ -353,10 +319,24 @@ function App() {
           <input value={hotkey} onChange={(e) => setHotkey(e.target.value)} />
         </label>
         <label>
+          Hotkey cambiar modo
+          <input value={modeHotkey} onChange={(e) => setModeHotkey(e.target.value)} />
+        </label>
+        <label>
           Modelo Groq
           <select value={model} onChange={(e) => setModel(e.target.value)}>
             <option value="llama-3.1-8b-instant">llama-3.1-8b-instant</option>
             <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile</option>
+          </select>
+        </label>
+        <label>
+          Modo de procesamiento
+          <select
+            value={processingMode}
+            onChange={(e) => setProcessingMode(e.target.value as "cloud_first" | "local_only")}
+          >
+            <option value="cloud_first">Nube primero (fallback local)</option>
+            <option value="local_only">Solo local (sin Groq)</option>
           </select>
         </label>
         <label>
