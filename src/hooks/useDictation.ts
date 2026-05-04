@@ -27,7 +27,7 @@ export function useDictation() {
     errorMessage: null,
     mode: DEFAULT_MODE,
     hotkey: "Ctrl+Space",
-    modeHotkey: "Ctrl+Shift+Space",
+    modeHotkey: "Ctrl+Shift+M",
   });
 
   const clearTimerRef = useRef<number | null>(null);

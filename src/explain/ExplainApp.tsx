@@ -37,41 +37,51 @@ export function ExplainApp() {
 
   useEffect(() => {
     const unsubs: Array<() => void> = [];
+    let disposed = false;
 
-    void listen<{ loading?: boolean }>("explain_reset", (e) => {
+    const trackUnlisten = (promise: Promise<() => void>) => {
+      void promise.then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        unsubs.push(unlisten);
+      });
+    };
+
+    trackUnlisten(listen<{ loading?: boolean }>("explain_reset", (e) => {
       setText("");
       setError(null);
       const p = e.payload;
       setLoading(p?.loading !== false);
-    }).then((unlisten) => {
-      unsubs.push(unlisten);
-    });
+    }));
 
-    void listen<{ content: string }>("explain_chunk", (e) => {
-      const piece = e.payload?.content ?? "";
-      if (piece) {
+    trackUnlisten(listen<{ content: string }>("explain_chunk", (e) => {
+      const content = e.payload?.content ?? "";
+      if (content) {
         setLoading(false);
-        setText((t) => t + piece);
+        setText(content);
       }
-    }).then((unlisten) => {
-      unsubs.push(unlisten);
-    });
+    }));
 
-    void listen("explain_done", () => {
+    trackUnlisten(listen("explain_done", () => {
       setLoading(false);
-    }).then((unlisten) => {
-      unsubs.push(unlisten);
-    });
+    }));
 
-    void listen<string>("explain_error", (e) => {
+    trackUnlisten(listen("explain_error", (e) => {
       setLoading(false);
-      const msg = e.payload;
-      setError(typeof msg === "string" ? msg : "Error al explicar.");
-    }).then((unlisten) => {
-      unsubs.push(unlisten);
-    });
+      const p = e.payload;
+      const msg =
+        typeof p === "string"
+          ? p
+          : p && typeof p === "object" && "message" in p && typeof (p as { message?: unknown }).message === "string"
+            ? (p as { message: string }).message
+            : "Error al explicar.";
+      setError(msg);
+    }));
 
     return () => {
+      disposed = true;
       for (const u of unsubs) u();
     };
   }, []);

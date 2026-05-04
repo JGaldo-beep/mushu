@@ -6,6 +6,7 @@ export const tauri = {
   completeOnboarding: () => invoke<FrontendState>("complete_onboarding"),
   saveSettings: (input: SaveSettingsInput) => invoke<FrontendState>("save_settings", { input }),
   saveGroqApiKey: (key: string) => invoke<void>("save_groq_api_key", { key }),
+  redeemGroqCoupon: (code: string) => invoke<void>("redeem_groq_coupon", { code }),
   testGroq: () => invoke<string>("test_groq"),
   getHistory: () => invoke<HistoryItem[]>("get_history"),
   clearHistory: () => invoke<void>("clear_history"),

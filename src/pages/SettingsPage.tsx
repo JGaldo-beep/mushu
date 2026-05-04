@@ -333,7 +333,7 @@ export function SettingsPage() {
                   id="mode_hotkey"
                   value={draft.mode_hotkey}
                   onChange={(e) => setField("mode_hotkey", e.target.value)}
-                  placeholder="Ctrl+Shift+Space"
+                  placeholder="Ctrl+Shift+M"
                   className="w-48 font-mono text-xs"
                 />
               }

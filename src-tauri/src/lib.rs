@@ -1,6 +1,6 @@
 use chrono::Utc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+use enigo::{Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use sqlx::{
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use std::{thread, vec};
 
 use futures_util::StreamExt;
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
@@ -31,13 +32,15 @@ const WHISPER_MODEL_URL: &str =
 const WHISPER_MODEL_FILE: &str = "ggml-base.bin";
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 const DEFAULT_HOTKEY: &str = "Ctrl+Space";
-const DEFAULT_MODE_HOTKEY: &str = "Ctrl+Shift+Space";
+const DEFAULT_MODE_HOTKEY: &str = "Ctrl+Shift+M";
+/// Antes del cambio por compatibilidad con 1Password (Ctrl+Shift+Space).
+const LEGACY_DEFAULT_MODE_HOTKEY: &str = "Ctrl+Shift+Space";
 const DEFAULT_MODEL: &str = "llama-3.1-8b-instant";
 const ALLOWED_GROQ_MODELS: [&str; 2] = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
 const GROQ_STT_MODEL: &str = "whisper-large-v3-turbo";
 const GROQ_STT_ENDPOINT: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const GROQ_CHAT_ENDPOINT: &str = "https://api.groq.com/openai/v1/chat/completions";
-const KEYRING_SERVICE: &str = "com.antonio.mushu";
+const KEYRING_SERVICE: &str = "com.mushu.desktop";
 const KEYRING_USER: &str = "groq_api_key";
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -366,7 +369,8 @@ struct AppState {
     recording_started_at: Mutex<Option<Instant>>,
     audio_buffer: Mutex<Vec<f32>>,
     audio_device: Mutex<AudioDevice>,
-    whisper: WhisperState,
+    /// `None` mientras descarga/carga el modelo en segundo plano (no bloquear la ventana al arrancar).
+    whisper: Arc<Mutex<Option<WhisperState>>>,
     settings: Mutex<AppSettings>,
     db: SqlitePool,
     llm_client: reqwest::Client,
@@ -385,12 +389,20 @@ fn stop_recording(state: tauri::State<AppState>, app: tauri::AppHandle) -> Resul
 }
 
 #[tauri::command]
-fn get_frontend_state(state: tauri::State<'_, AppState>) -> Result<FrontendState, String> {
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| "No se pudo bloquear settings".to_string())?
-        .clone();
+fn get_frontend_state(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<FrontendState, String> {
+    let settings = {
+        let mut guard = state
+            .settings
+            .lock()
+            .map_err(|_| "No se pudo bloquear settings".to_string())?;
+        if let Some(done) = read_onboarding_completed_from_disk(&app) {
+            guard.onboarding_completed = done;
+        }
+        guard.clone()
+    };
     Ok(FrontendState {
         mode: ModeInfo::from(settings.mode),
         hotkey: settings.hotkey,
@@ -398,7 +410,7 @@ fn get_frontend_state(state: tauri::State<'_, AppState>) -> Result<FrontendState
         model: settings.model,
         processing_mode: settings.processing_mode.as_str().to_string(),
         has_groq_key: load_groq_api_key(&state).is_ok(),
-        microphones: list_input_devices()?,
+        microphones: list_input_devices_or_empty(),
         selected_microphone: settings.microphone,
         theme: settings.theme.as_str().to_string(),
         sound_effects_enabled: settings.sound_effects_enabled,
@@ -420,7 +432,7 @@ fn complete_onboarding(
         settings.onboarding_completed = true;
         save_settings_file(&app, &settings)?;
     }
-    let out = get_frontend_state(state)?;
+    let out = get_frontend_state(app.clone(), state)?;
     let _ = app.emit("frontend_state_changed", ());
     Ok(out)
 }
@@ -500,12 +512,11 @@ fn save_settings(
             "volume": input.sound_effects_volume.clamp(0.0_f32, 1.0_f32),
         }),
     );
-    get_frontend_state(state)
+    get_frontend_state(app, state)
 }
 
-#[tauri::command]
-fn save_groq_api_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
-    let trimmed = key.trim().to_string();
+fn persist_groq_api_key(app: &tauri::AppHandle, key: &str) -> Result<(), String> {
+    let trimmed = key.trim();
     if trimmed.is_empty() {
         return Err("La API key no puede estar vacía.".to_string());
     }
@@ -524,9 +535,84 @@ fn save_groq_api_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     if let Ok(entry) = Entry::new(KEYRING_SERVICE, KEYRING_USER) {
-        let _ = entry.set_password(&trimmed);
+        let _ = entry.set_password(trimmed);
     }
     Ok(())
+}
+
+#[tauri::command]
+fn save_groq_api_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
+    persist_groq_api_key(&app, &key)
+}
+
+const DEFAULT_REDEEM_URL: &str = "https://www.juangaldo.com/api/redeem";
+
+#[derive(Deserialize)]
+struct RedeemGroqResponse {
+    groq_api_key: String,
+}
+
+/// Canjea un cupón contra `MUSHU_REDEEM_URL` (POST JSON `{ "code": "..." }` → `{ "groq_api_key": "..." }`).
+#[tauri::command]
+async fn redeem_groq_coupon(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    code: String,
+) -> Result<(), String> {
+    let url = std::env::var("MUSHU_REDEEM_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_REDEEM_URL.to_string());
+    let url = url.as_str();
+    let trimmed = code.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Escribe un código de cupón.".to_string());
+    }
+    if trimmed.len() > 64
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("Formato de cupón no válido (usa letras, números, guiones o guiones bajos).".to_string());
+    }
+
+    let client = state.llm_client.clone();
+    let body = serde_json::json!({ "code": trimmed });
+    let response = tokio::time::timeout(
+        Duration::from_secs(25),
+        client.post(url).json(&body).send(),
+    )
+    .await
+    .map_err(|_| "Tiempo de espera agotado al contactar el servicio de cupones.".to_string())?
+    .map_err(|e| format!("No se pudo contactar el servicio de cupones: {e}"))?;
+
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+
+    if status.is_success() {
+        let parsed: RedeemGroqResponse =
+            serde_json::from_str(&text).map_err(|_| {
+                "El servidor de cupones respondió pero el formato no es el esperado (falta groq_api_key)."
+                    .to_string()
+            })?;
+        let key = parsed.groq_api_key.trim();
+        if key.is_empty() {
+            return Err("El servidor devolvió una API key vacía.".to_string());
+        }
+        persist_groq_api_key(&app, key)?;
+        Ok(())
+    } else {
+        let msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            v.get("message")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("Cupón no válido (HTTP {}).", status.as_u16()))
+        } else {
+            format!("Cupón no válido (HTTP {}).", status.as_u16())
+        };
+        Err(msg)
+    }
 }
 
 #[tauri::command]
@@ -687,6 +773,8 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
                 let _ = app_handle.emit("transcription_error", e);
                 return;
             }
+            // Dar tiempo a que la webview cargue el bundle y registre los `listen` antes de emitir SSE.
+            tokio::time::sleep(Duration::from_millis(280)).await;
             emit_explain_event(
                 &app_handle,
                 "explain_reset",
@@ -1123,8 +1211,14 @@ async fn transcribe_audio_groq(state: &AppState, wav: Vec<u8>) -> Result<String,
 fn transcribe_audio_local(state: &AppState, audio: &CapturedAudio) -> Result<String, String> {
     let whisper_audio =
         prepare_audio_for_whisper(&audio.samples, audio.sample_rate, audio.channels);
-    let context = state
+    let slot = state
         .whisper
+        .lock()
+        .map_err(|_| "No se pudo bloquear Whisper".to_string())?;
+    let inner = slot.as_ref().ok_or_else(|| {
+        "Whisper aún se está descargando o cargando. Espera unos segundos y vuelve a intentar.".to_string()
+    })?;
+    let context = inner
         .context
         .lock()
         .map_err(|_| "No se pudo bloquear WhisperContext".to_string())?;
@@ -1720,6 +1814,11 @@ async fn groq_explain_stream(
     app: &tauri::AppHandle,
     full_out: &mut String,
 ) -> Result<(), String> {
+    emit_explain_event(
+        app,
+        "explain_reset",
+        serde_json::json!({ "loading": true }),
+    );
     validate_model(model)?;
     let key = load_groq_api_key(state)?;
     const SYSTEM: &str = r#"Eres un asistente experto. El usuario comparte un texto que seleccionó en su pantalla.
@@ -1779,7 +1878,7 @@ Ve directo al punto, sin saludos ni meta-comentarios."#;
                 emit_explain_event(
                     app,
                     "explain_chunk",
-                    serde_json::json!({ "content": piece }),
+                    serde_json::json!({ "content": full_out }),
                 );
             }
         }
@@ -1798,7 +1897,7 @@ Ve directo al punto, sin saludos ni meta-comentarios."#;
                         emit_explain_event(
                             app,
                             "explain_chunk",
-                            serde_json::json!({ "content": piece }),
+                            serde_json::json!({ "content": full_out }),
                         );
                     }
                 }
@@ -1875,6 +1974,10 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     if parse_shortcut(&settings.mode_hotkey).is_err() {
         settings.mode_hotkey = default_mode_hotkey();
     }
+    // Antes el default de modo era Ctrl+Shift+Space (choca con 1Password y otras apps).
+    if settings.mode_hotkey == LEGACY_DEFAULT_MODE_HOTKEY {
+        settings.mode_hotkey = DEFAULT_MODE_HOTKEY.to_string();
+    }
     if settings.hotkey == settings.mode_hotkey {
         settings.mode_hotkey = default_mode_hotkey();
         if settings.hotkey == settings.mode_hotkey {
@@ -1902,6 +2005,15 @@ fn settings_path(app: &tauri::AppHandle) -> Option<PathBuf> {
         .app_local_data_dir()
         .ok()
         .map(|p| p.join("settings.json"))
+}
+
+/// Lee solo el flag desde disco para que coincida con `settings.json` sin reiniciar el proceso
+/// (p. ej. demos) y para evitar desincronía memoria ↔ archivo.
+fn read_onboarding_completed_from_disk(app: &tauri::AppHandle) -> Option<bool> {
+    let path = settings_path(app)?;
+    let raw = fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("onboarding_completed").and_then(|x| x.as_bool())
 }
 
 fn record_audio(app: tauri::AppHandle) -> Result<(), String> {
@@ -2063,6 +2175,14 @@ fn list_input_devices() -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// No debe tumbar `get_frontend_state` (p. ej. onboarding) si el stack de audio falla al enumerar.
+fn list_input_devices_or_empty() -> Vec<String> {
+    list_input_devices().unwrap_or_else(|e| {
+        eprintln!("[mushu] list_input_devices failed (lista vacía): {e}");
+        Vec::new()
+    })
+}
+
 fn initialize_audio_device(preferred_name: Option<&str>) -> Result<AudioDevice, String> {
     let host = cpal::default_host();
     let device = if let Some(name) = preferred_name {
@@ -2128,9 +2248,33 @@ fn download_whisper_model(model_path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn resolve_overlay_monitor(
+    app: &tauri::AppHandle,
+    overlay: &tauri::WebviewWindow,
+) -> Option<tauri::Monitor> {
+    // Con la ventana oculta, `current_monitor()` a veces devuelve None o un monitor que no
+    // coincide con donde está el cursor; priorizamos el monitor bajo el puntero.
+    if let Ok(enigo) = Enigo::new(&Settings::default()) {
+        if let Ok((x, y)) = enigo.location() {
+            if let Ok(Some(m)) = overlay.monitor_from_point(x as f64, y as f64) {
+                return Some(m);
+            }
+        }
+    }
+    if let Ok(Some(m)) = overlay.current_monitor() {
+        return Some(m);
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        if let Ok(Some(m)) = main.current_monitor() {
+            return Some(m);
+        }
+    }
+    overlay.primary_monitor().ok().flatten()
+}
+
 fn show_overlay(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("overlay") {
-        if let Ok(Some(monitor)) = window.current_monitor() {
+        if let Some(monitor) = resolve_overlay_monitor(app, &window) {
             let monitor_size = monitor.size();
             let monitor_pos = monitor.position();
             let outer = window.outer_size().map_err(|e| e.to_string())?;
@@ -2144,6 +2288,8 @@ fn show_overlay(app: &tauri::AppHandle) -> Result<(), String> {
         window
             .set_always_on_top(true)
             .map_err(|error| error.to_string())?;
+        // En Windows otras ventanas pueden ganar el Z-order; repetir refuerza TOPMOST.
+        let _ = window.set_always_on_top(true);
     }
     Ok(())
 }
@@ -2353,7 +2499,11 @@ fn setup_tray(app: &tauri::AppHandle, mode: Mode) -> Result<(), String> {
     let quit_i =
         MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).map_err(|e| e.to_string())?;
     let menu = Menu::with_items(app, &[&open_i, &mode_i, &quit_i]).map_err(|e| e.to_string())?;
+    let tray_image = Image::from_bytes(include_bytes!("../icons/32x32.png"))
+        .map_err(|e| format!("icono de bandeja: {e}"))?;
     TrayIconBuilder::with_id("main-tray")
+        .icon(tray_image)
+        .tooltip("Mushu")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -2394,6 +2544,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -2444,7 +2601,6 @@ pub fn run() {
         )
         .setup(|app| {
             let app_handle = app.handle().clone();
-            let whisper = initialize_whisper(&app_handle).map_err(|e| e.to_string())?;
             let settings = load_settings_file(&app_handle);
             let audio_device = initialize_audio_device(settings.microphone.as_deref())?;
             let data_dir = app_handle
@@ -2452,7 +2608,11 @@ pub fn run() {
                 .app_local_data_dir()
                 .map_err(|e| e.to_string())?;
             fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+            if let Err(e) = save_settings_file(&app_handle, &settings) {
+                eprintln!("[mushu] no se pudo inicializar settings.json: {e}");
+            }
             let secrets_path = data_dir.join("secrets.json");
+            let whisper: Arc<Mutex<Option<WhisperState>>> = Arc::new(Mutex::new(None));
             let db = tauri::async_runtime::block_on(init_db(&app_handle))?;
             let state = AppState {
                 is_recording: AtomicBool::new(false),
@@ -2460,7 +2620,7 @@ pub fn run() {
                 recording_started_at: Mutex::new(None),
                 audio_buffer: Mutex::new(Vec::new()),
                 audio_device: Mutex::new(audio_device),
-                whisper,
+                whisper: whisper.clone(),
                 settings: Mutex::new(settings.clone()),
                 db,
                 llm_client: reqwest::Client::new(),
@@ -2468,14 +2628,33 @@ pub fn run() {
             };
             app.manage(state);
             prewarm_groq(app_handle.clone());
+            {
+                let app_for_whisper = app_handle.clone();
+                let whisper_slot = whisper.clone();
+                thread::spawn(move || match initialize_whisper(&app_for_whisper) {
+                    Ok(loaded) => {
+                        if let Ok(mut slot) = whisper_slot.lock() {
+                            *slot = Some(loaded);
+                        }
+                        eprintln!("[mushu] whisper listo");
+                    }
+                    Err(err) => {
+                        eprintln!("[mushu] no se pudo inicializar whisper: {err}");
+                    }
+                });
+            }
             setup_tray(&app_handle, settings.mode)?;
 
-            app.handle()
-                .global_shortcut()
-                .register(parse_shortcut(&settings.hotkey)?)
-                .map_err(|e| {
-                    map_shortcut_register_error(e.to_string(), &settings.hotkey, "de dictado")
-                })?;
+            let dictation_parsed = parse_shortcut(&settings.hotkey)?;
+            if let Err(e) = app.handle().global_shortcut().register(dictation_parsed) {
+                // No bloqueamos el arranque si el atajo de dictado está ocupado por otra app.
+                let msg = map_shortcut_register_error(
+                    e.to_string(),
+                    &settings.hotkey,
+                    "de dictado",
+                );
+                eprintln!("{msg}");
+            }
             let mode_parsed = parse_shortcut(&settings.mode_hotkey)?;
             if let Err(e) = app.handle().global_shortcut().register(mode_parsed) {
                 // No bloqueamos el arranque si el atajo de cambio de modo está ocupado por otra app.
@@ -2504,6 +2683,7 @@ pub fn run() {
             get_frontend_state,
             save_settings,
             save_groq_api_key,
+            redeem_groq_coupon,
             test_groq,
             get_history,
             clear_history,
