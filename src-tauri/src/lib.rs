@@ -32,6 +32,9 @@ const DEFAULT_HOTKEY: &str = "Ctrl+Space";
 const DEFAULT_MODE_HOTKEY: &str = "Ctrl+Shift+Space";
 const DEFAULT_MODEL: &str = "llama-3.1-8b-instant";
 const ALLOWED_GROQ_MODELS: [&str; 2] = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
+const GROQ_STT_MODEL: &str = "whisper-large-v3-turbo";
+const GROQ_STT_ENDPOINT: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
+const GROQ_CHAT_ENDPOINT: &str = "https://api.groq.com/openai/v1/chat/completions";
 const KEYRING_SERVICE: &str = "com.antonio.mushu";
 const KEYRING_USER: &str = "groq_api_key";
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -82,9 +85,24 @@ impl Mode {
         }
     }
 
+    fn from_name(value: &str) -> Option<Self> {
+        Some(match value {
+            "DEFAULT" => Self::Default,
+            "EMAIL" => Self::Email,
+            "FORMAL" => Self::Formal,
+            "CASUAL" => Self::Casual,
+            "CODE" => Self::Code,
+            "HELP" => Self::Help,
+            "REPLY_EN" => Self::ReplyEn,
+            "TRANSLATE" => Self::Translate,
+            _ => return None,
+        })
+    }
+
     fn color(self) -> &'static str {
         match self {
-            Self::Default => "#FFFFFF",
+            // Neutro legible en tema claro y oscuro (evita blanco sobre vidrio claro).
+            Self::Default => "#64748b",
             Self::Email => "#3B82F6",
             Self::Formal => "#8B5CF6",
             Self::Casual => "#10B981",
@@ -150,6 +168,12 @@ struct AppSettings {
     processing_mode: ProcessingMode,
     mode: Mode,
     microphone: Option<String>,
+    #[serde(default)]
+    theme: AppTheme,
+    #[serde(default = "default_sound_effects_enabled")]
+    sound_effects_enabled: bool,
+    #[serde(default = "default_sound_effects_volume")]
+    sound_effects_volume: f32,
 }
 
 impl Default for AppSettings {
@@ -161,6 +185,9 @@ impl Default for AppSettings {
             processing_mode: ProcessingMode::CloudFirst,
             mode: Mode::Default,
             microphone: None,
+            theme: AppTheme::default(),
+            sound_effects_enabled: default_sound_effects_enabled(),
+            sound_effects_volume: default_sound_effects_volume(),
         }
     }
 }
@@ -169,6 +196,38 @@ impl Default for ProcessingMode {
     fn default() -> Self {
         Self::CloudFirst
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AppTheme {
+    System,
+    Light,
+    Dark,
+}
+
+impl Default for AppTheme {
+    fn default() -> Self {
+        Self::System
+    }
+}
+
+impl AppTheme {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
+fn default_sound_effects_enabled() -> bool {
+    true
+}
+
+fn default_sound_effects_volume() -> f32 {
+    0.22
 }
 
 fn default_mode_hotkey() -> String {
@@ -185,6 +244,9 @@ struct FrontendState {
     has_groq_key: bool,
     microphones: Vec<String>,
     selected_microphone: Option<String>,
+    theme: String,
+    sound_effects_enabled: bool,
+    sound_effects_volume: f32,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -204,6 +266,12 @@ struct SaveSettingsInput {
     model: String,
     processing_mode: ProcessingMode,
     microphone: Option<String>,
+    #[serde(default)]
+    theme: AppTheme,
+    #[serde(default = "default_sound_effects_enabled")]
+    sound_effects_enabled: bool,
+    #[serde(default = "default_sound_effects_volume")]
+    sound_effects_volume: f32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -231,12 +299,43 @@ struct GroqResponse {
     choices: Vec<GroqChoice>,
 }
 
+#[derive(Deserialize)]
+struct GroqTranscriptionResponse {
+    text: String,
+}
+
+#[derive(Debug, Default)]
+struct TranscriptionMetrics {
+    backend: &'static str,
+    recording_duration_ms: u64,
+    capture_ms: u64,
+    encode_audio_ms: u64,
+    groq_stt_upload_and_transcribe_ms: u64,
+    local_whisper_ms: u64,
+    audio_duration_ms: u64,
+    audio_bytes: usize,
+}
+
 struct AudioDevice {
     device: cpal::Device,
     config: cpal::StreamConfig,
     sample_format: cpal::SampleFormat,
     sample_rate: u32,
     channels: u16,
+}
+
+struct CapturedAudio {
+    samples: Vec<f32>,
+    sample_rate: u32,
+    channels: u16,
+}
+
+impl CapturedAudio {
+    fn duration_ms(&self) -> u64 {
+        let channels = u64::from(self.channels.max(1));
+        let sample_rate = u64::from(self.sample_rate.max(1));
+        (self.samples.len() as u64).saturating_mul(1000) / sample_rate / channels
+    }
 }
 
 struct WhisperState {
@@ -288,6 +387,9 @@ fn get_frontend_state(state: tauri::State<'_, AppState>) -> Result<FrontendState
         has_groq_key: load_groq_api_key(&state).is_ok(),
         microphones: list_input_devices()?,
         selected_microphone: settings.microphone,
+        theme: settings.theme.as_str().to_string(),
+        sound_effects_enabled: settings.sound_effects_enabled,
+        sound_effects_volume: settings.sound_effects_volume,
     })
 }
 
@@ -300,7 +402,9 @@ fn save_settings(
     let parsed_dictation = parse_shortcut(&input.hotkey)?;
     let parsed_mode = parse_shortcut(&input.mode_hotkey)?;
     if parsed_dictation == parsed_mode {
-        return Err("El atajo de dictado y el atajo de cambio de modo deben ser distintos.".to_string());
+        return Err(
+            "El atajo de dictado y el atajo de cambio de modo deben ser distintos.".to_string(),
+        );
     }
     validate_model(&input.model)?;
     let dictation_hotkey_text = input.hotkey.clone();
@@ -324,15 +428,16 @@ fn save_settings(
     settings.model = input.model;
     settings.processing_mode = input.processing_mode;
     settings.microphone = input.microphone;
+    settings.theme = input.theme;
+    settings.sound_effects_enabled = input.sound_effects_enabled;
+    settings.sound_effects_volume = input.sound_effects_volume.clamp(0.0_f32, 1.0_f32);
     save_settings_file(&app, &settings)?;
     let target_mic = settings.microphone.clone();
     drop(settings);
 
     if target_mic != previous_mic {
         if state.is_recording.load(Ordering::Acquire) {
-            return Err(
-                "No se puede cambiar el micrófono mientras se está grabando.".to_string(),
-            );
+            return Err("No se puede cambiar el micrófono mientras se está grabando.".to_string());
         }
         let next_audio = initialize_audio_device(target_mic.as_deref())?;
         let mut audio = state
@@ -353,15 +458,16 @@ fn save_settings(
         .map_err(|e| {
             map_shortcut_register_error(e.to_string(), &dictation_hotkey_text, "de dictado")
         })?;
-    app.global_shortcut()
-        .register(parsed_mode)
-        .map_err(|e| {
-            map_shortcut_register_error(
-                e.to_string(),
-                &mode_hotkey_text,
-                "de cambio de modo",
-            )
-        })?;
+    app.global_shortcut().register(parsed_mode).map_err(|e| {
+        map_shortcut_register_error(e.to_string(), &mode_hotkey_text, "de cambio de modo")
+    })?;
+    let _ = app.emit(
+        "mushu_sound_prefs",
+        serde_json::json!({
+            "enabled": input.sound_effects_enabled,
+            "volume": input.sound_effects_volume.clamp(0.0_f32, 1.0_f32),
+        }),
+    );
     get_frontend_state(state)
 }
 
@@ -396,7 +502,7 @@ async fn get_history(state: tauri::State<'_, AppState>) -> Result<Vec<HistoryIte
     sqlx::query_as::<_, HistoryItem>(
         "SELECT id, timestamp, raw_text, processed_text, mode_used, duration_ms
          FROM transcription_history
-         ORDER BY id DESC LIMIT 20",
+         ORDER BY id DESC LIMIT 80",
     )
     .fetch_all(&state.db)
     .await
@@ -418,6 +524,19 @@ fn copy_to_clipboard(text: String) -> Result<(), String> {
     clipboard.set_text(text).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn set_mode(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    mode: String,
+) -> Result<(), String> {
+    if state.is_recording.load(Ordering::Acquire) {
+        return Err("No se puede cambiar el modo mientras grabas.".to_string());
+    }
+    let parsed = Mode::from_name(&mode).ok_or_else(|| format!("Modo inválido: {mode}"))?;
+    update_mode(&app, &state, parsed, true)
+}
+
 fn do_start_recording(state: &AppState, app: &tauri::AppHandle) -> Result<(), String> {
     if state.is_recording.swap(true, Ordering::AcqRel) {
         return Ok(());
@@ -425,7 +544,8 @@ fn do_start_recording(state: &AppState, app: &tauri::AppHandle) -> Result<(), St
     *state
         .recording_started_at
         .lock()
-        .map_err(|_| "No se pudo bloquear recording_started_at".to_string())? = Some(Instant::now());
+        .map_err(|_| "No se pudo bloquear recording_started_at".to_string())? =
+        Some(Instant::now());
     state
         .audio_buffer
         .lock()
@@ -439,8 +559,10 @@ fn do_start_recording(state: &AppState, app: &tauri::AppHandle) -> Result<(), St
         .mode;
 
     emit_dictation_processing(app, false);
-    let _ = app.emit("recording_started", ModeInfo::from(mode));
+    emit_mushu_sound_prefs(app, state);
+    // Mostrar el overlay antes de `recording_started`: el WebView suele bloquear audio si la ventana sigue oculta.
     let _ = show_overlay(app);
+    let _ = app.emit("recording_started", ModeInfo::from(mode));
 
     let app_for_audio = app.clone();
     thread::spawn(move || {
@@ -470,6 +592,7 @@ fn do_stop_recording(state: &AppState, app: &tauri::AppHandle) -> Result<usize, 
 fn process_hotkey_release(app: &tauri::AppHandle) {
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
+        let t_pipeline = Instant::now();
         let state = app_handle.state::<AppState>();
         let duration_ms = state
             .recording_started_at
@@ -479,7 +602,18 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
             .map(|start| start.elapsed().as_millis() as i64)
             .unwrap_or(0);
 
-        let raw_text = match transcribe_audio(&state) {
+        let settings = match state.settings.lock() {
+            Ok(s) => s.clone(),
+            Err(_) => {
+                emit_dictation_processing(&app_handle, false);
+                let _ = app_handle.emit("transcription_error", "No se pudo leer settings");
+                let _ = hide_overlay(&app_handle);
+                return;
+            }
+        };
+
+        let t_capture = Instant::now();
+        let captured = match capture_audio(&state) {
             Ok(text) => text,
             Err(e) => {
                 emit_dictation_processing(&app_handle, false);
@@ -488,17 +622,35 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
                 return;
             }
         };
-        if raw_text.is_empty() {
-            emit_dictation_processing(&app_handle, false);
-            let _ = hide_overlay(&app_handle);
-            return;
-        }
+        let capture_ms = t_capture.elapsed().as_millis() as u64;
 
-        let settings = match state.settings.lock() {
-            Ok(s) => s.clone(),
-            Err(_) => {
+        let (raw_text, mut transcription_metrics) =
+            match transcribe_audio(&state, &settings, &captured).await {
+                Ok(output) => output,
+                Err(e) => {
+                    emit_dictation_processing(&app_handle, false);
+                    let _ = app_handle.emit("transcription_error", e);
+                    let _ = hide_overlay(&app_handle);
+                    return;
+                }
+            };
+        transcription_metrics.capture_ms = capture_ms;
+        transcription_metrics.recording_duration_ms = duration_ms.max(0) as u64;
+        let whisper_ms = transcription_metrics.groq_stt_upload_and_transcribe_ms
+            + transcription_metrics.local_whisper_ms
+            + transcription_metrics.encode_audio_ms;
+        let raw_text = match meaningful_speech_from_whisper(&raw_text) {
+            Some(t) => t,
+            None => {
+                log_pipeline_timing(
+                    "sin_habla",
+                    &transcription_metrics,
+                    0,
+                    0,
+                    0,
+                    t_pipeline.elapsed().as_millis() as u64,
+                );
                 emit_dictation_processing(&app_handle, false);
-                let _ = app_handle.emit("transcription_error", "No se pudo leer settings");
                 let _ = hide_overlay(&app_handle);
                 return;
             }
@@ -519,13 +671,13 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
         }
 
         if settings.mode == Mode::Help {
+            let t_llm = Instant::now();
             match mushu_assistant_reply(&state, &raw_text).await {
                 Ok(reply) => {
+                    let llm_ms = t_llm.elapsed().as_millis() as u64;
                     emit_dictation_processing(&app_handle, false);
-                    let _ = app_handle.emit(
-                        "mushu_reply",
-                        serde_json::json!({ "text": reply }),
-                    );
+                    let _ = app_handle.emit("mushu_reply", serde_json::json!({ "text": reply }));
+                    let t_db = Instant::now();
                     let _ = save_history(
                         &state.db,
                         &raw_text,
@@ -534,7 +686,18 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
                         duration_ms,
                     )
                     .await;
-                    tokio::time::sleep(Duration::from_secs(7)).await;
+                    let db_save_ms = t_db.elapsed().as_millis() as u64;
+                    let total_ms = t_pipeline.elapsed().as_millis() as u64;
+                    log_pipeline_timing(
+                        "help",
+                        &transcription_metrics,
+                        llm_ms,
+                        0,
+                        db_save_ms,
+                        total_ms,
+                    );
+                    emit_dictation_latency(&app_handle, whisper_ms, llm_ms, 0, total_ms, "help");
+                    tokio::time::sleep(Duration::from_millis(2500)).await;
                 }
                 Err(err) => {
                     emit_dictation_processing(&app_handle, false);
@@ -568,20 +731,26 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
                 let _ = hide_overlay(&app_handle);
                 return;
             }
-            match groq_english_reply_from_clipboard(&state, &settings.model, &clip, &raw_text).await {
+            let t_llm = Instant::now();
+            match groq_english_reply_from_clipboard(&state, &settings.model, &clip, &raw_text).await
+            {
                 Ok(processed_text) => {
+                    let llm_ms = t_llm.elapsed().as_millis() as u64;
+                    let t_paste = Instant::now();
                     if let Err(e) = paste_text(&processed_text) {
                         emit_dictation_processing(&app_handle, false);
                         let _ = app_handle.emit("transcription_error", e);
                         let _ = hide_overlay(&app_handle);
                         return;
                     }
+                    let paste_ms = t_paste.elapsed().as_millis() as u64;
                     let raw_for_db = format!(
                         "(contexto EN, {} chars)\n{}\n\n(voz)\n{}",
                         clip.chars().count(),
                         clip.chars().take(2500).collect::<String>(),
                         raw_text
                     );
+                    let t_db = Instant::now();
                     let _ = save_history(
                         &state.db,
                         &raw_for_db,
@@ -590,13 +759,31 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
                         duration_ms,
                     )
                     .await;
+                    let db_save_ms = t_db.elapsed().as_millis() as u64;
                     emit_dictation_processing(&app_handle, false);
                     let payload = serde_json::json!({
                         "text": processed_text,
                         "mode": ModeInfo::from(settings.mode),
                     });
                     let _ = app_handle.emit("transcription_done", payload);
-                    tokio::time::sleep(Duration::from_millis(2000)).await;
+                    let total_ms = t_pipeline.elapsed().as_millis() as u64;
+                    log_pipeline_timing(
+                        "reply_en",
+                        &transcription_metrics,
+                        llm_ms,
+                        paste_ms,
+                        db_save_ms,
+                        total_ms,
+                    );
+                    emit_dictation_latency(
+                        &app_handle,
+                        whisper_ms,
+                        llm_ms,
+                        paste_ms,
+                        total_ms,
+                        "reply_en",
+                    );
+                    tokio::time::sleep(Duration::from_millis(900)).await;
                 }
                 Err(err) => {
                     let _ = app_handle.emit("groq_error", &err);
@@ -618,14 +805,19 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
                 let _ = hide_overlay(&app_handle);
                 return;
             }
+            let t_llm = Instant::now();
             match groq_translate_to_spanish(&state, &settings.model, &source).await {
                 Ok(translated) => {
+                    let llm_ms = t_llm.elapsed().as_millis() as u64;
+                    let t_clip = Instant::now();
                     if let Err(e) = copy_text_only(&translated) {
                         emit_dictation_processing(&app_handle, false);
                         let _ = app_handle.emit("transcription_error", e);
                         let _ = hide_overlay(&app_handle);
                         return;
                     }
+                    let paste_ms = t_clip.elapsed().as_millis() as u64;
+                    let t_db = Instant::now();
                     let _ = save_history(
                         &state.db,
                         &raw_text,
@@ -634,12 +826,28 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
                         duration_ms,
                     )
                     .await;
+                    let db_save_ms = t_db.elapsed().as_millis() as u64;
                     emit_dictation_processing(&app_handle, false);
-                    let _ = app_handle.emit(
-                        "mushu_reply",
-                        serde_json::json!({ "text": translated }),
+                    let total_ms = t_pipeline.elapsed().as_millis() as u64;
+                    log_pipeline_timing(
+                        "translate",
+                        &transcription_metrics,
+                        llm_ms,
+                        paste_ms,
+                        db_save_ms,
+                        total_ms,
                     );
-                    tokio::time::sleep(Duration::from_secs(7)).await;
+                    emit_dictation_latency(
+                        &app_handle,
+                        whisper_ms,
+                        llm_ms,
+                        paste_ms,
+                        total_ms,
+                        "translate",
+                    );
+                    let _ =
+                        app_handle.emit("mushu_reply", serde_json::json!({ "text": translated }));
+                    tokio::time::sleep(Duration::from_millis(2500)).await;
                 }
                 Err(err) => {
                     emit_dictation_processing(&app_handle, false);
@@ -660,14 +868,30 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
                 let _ = hide_overlay(&app_handle);
                 return;
             }
+            let t_llm = Instant::now();
             match mushu_assistant_reply(&state, &question).await {
                 Ok(reply) => {
+                    let llm_ms = t_llm.elapsed().as_millis() as u64;
                     emit_dictation_processing(&app_handle, false);
-                    let _ = app_handle.emit(
-                        "mushu_reply",
-                        serde_json::json!({ "text": reply }),
+                    let _ = app_handle.emit("mushu_reply", serde_json::json!({ "text": reply }));
+                    let total_ms = t_pipeline.elapsed().as_millis() as u64;
+                    log_pipeline_timing(
+                        "pregunta_mushu",
+                        &transcription_metrics,
+                        llm_ms,
+                        0,
+                        0,
+                        total_ms,
                     );
-                    tokio::time::sleep(Duration::from_secs(7)).await;
+                    emit_dictation_latency(
+                        &app_handle,
+                        whisper_ms,
+                        llm_ms,
+                        0,
+                        total_ms,
+                        "pregunta_mushu",
+                    );
+                    tokio::time::sleep(Duration::from_millis(2500)).await;
                 }
                 Err(err) => {
                     emit_dictation_processing(&app_handle, false);
@@ -678,6 +902,7 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
             return;
         }
 
+        let t_llm = Instant::now();
         let processed_text = match settings.processing_mode {
             ProcessingMode::CloudFirst => {
                 match transform_with_mode(&state, settings.mode, &settings.model, &raw_text).await {
@@ -693,14 +918,24 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
             }
             ProcessingMode::LocalOnly => raw_text.clone(),
         };
+        let llm_ms = t_llm.elapsed().as_millis() as u64;
 
+        if meaningful_speech_from_whisper(&processed_text).is_none() {
+            emit_dictation_processing(&app_handle, false);
+            let _ = hide_overlay(&app_handle);
+            return;
+        }
+
+        let t_paste = Instant::now();
         if let Err(e) = paste_text(&processed_text) {
             emit_dictation_processing(&app_handle, false);
             let _ = app_handle.emit("transcription_error", e);
             let _ = hide_overlay(&app_handle);
             return;
         }
+        let paste_ms = t_paste.elapsed().as_millis() as u64;
 
+        let t_db = Instant::now();
         let _ = save_history(
             &state.db,
             &raw_text,
@@ -709,6 +944,7 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
             duration_ms,
         )
         .await;
+        let db_save_ms = t_db.elapsed().as_millis() as u64;
 
         emit_dictation_processing(&app_handle, false);
         let payload = serde_json::json!({
@@ -716,12 +952,29 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
             "mode": ModeInfo::from(settings.mode),
         });
         let _ = app_handle.emit("transcription_done", payload);
-        tokio::time::sleep(Duration::from_millis(2000)).await;
+        let total_ms = t_pipeline.elapsed().as_millis() as u64;
+        log_pipeline_timing(
+            "dictado",
+            &transcription_metrics,
+            llm_ms,
+            paste_ms,
+            db_save_ms,
+            total_ms,
+        );
+        emit_dictation_latency(
+            &app_handle,
+            whisper_ms,
+            llm_ms,
+            paste_ms,
+            total_ms,
+            "dictado",
+        );
+        tokio::time::sleep(Duration::from_millis(900)).await;
         let _ = hide_overlay(&app_handle);
     });
 }
 
-fn transcribe_audio(state: &AppState) -> Result<String, String> {
+fn capture_audio(state: &AppState) -> Result<CapturedAudio, String> {
     let audio = {
         let mut buf = state
             .audio_buffer
@@ -729,9 +982,6 @@ fn transcribe_audio(state: &AppState) -> Result<String, String> {
             .map_err(|_| "No se pudo bloquear audio_buffer".to_string())?;
         std::mem::take(&mut *buf)
     };
-    if audio.is_empty() {
-        return Ok(String::new());
-    }
     let (sample_rate, channels) = {
         let device = state
             .audio_device
@@ -739,7 +989,87 @@ fn transcribe_audio(state: &AppState) -> Result<String, String> {
             .map_err(|_| "No se pudo bloquear audio_device".to_string())?;
         (device.sample_rate, device.channels)
     };
-    let whisper_audio = prepare_audio_for_whisper(&audio, sample_rate, channels);
+    Ok(CapturedAudio {
+        samples: audio,
+        sample_rate,
+        channels,
+    })
+}
+
+async fn transcribe_audio(
+    state: &AppState,
+    settings: &AppSettings,
+    audio: &CapturedAudio,
+) -> Result<(String, TranscriptionMetrics), String> {
+    let mut metrics = TranscriptionMetrics {
+        audio_duration_ms: audio.duration_ms(),
+        ..TranscriptionMetrics::default()
+    };
+    if audio.samples.is_empty() {
+        metrics.backend = "empty";
+        return Ok((String::new(), metrics));
+    }
+
+    if settings.processing_mode == ProcessingMode::CloudFirst {
+        let t_encode = Instant::now();
+        let wav = encode_wav_pcm16(audio);
+        metrics.encode_audio_ms = t_encode.elapsed().as_millis() as u64;
+        metrics.audio_bytes = wav.len();
+
+        let t_groq = Instant::now();
+        match transcribe_audio_groq(state, wav).await {
+            Ok(text) => {
+                metrics.backend = "groq_whisper_large_v3_turbo";
+                metrics.groq_stt_upload_and_transcribe_ms = t_groq.elapsed().as_millis() as u64;
+                return Ok((text, metrics));
+            }
+            Err(err) => {
+                metrics.groq_stt_upload_and_transcribe_ms = t_groq.elapsed().as_millis() as u64;
+                eprintln!("[mushu:latency] groq_stt_error=\"{err}\" fallback=local_whisper");
+            }
+        }
+    }
+
+    let t_local = Instant::now();
+    let text = transcribe_audio_local(state, audio)?;
+    metrics.backend = "local_whisper";
+    metrics.local_whisper_ms = t_local.elapsed().as_millis() as u64;
+    Ok((text, metrics))
+}
+
+async fn transcribe_audio_groq(state: &AppState, wav: Vec<u8>) -> Result<String, String> {
+    let key = load_groq_api_key(state)?;
+    let file_part = reqwest::multipart::Part::bytes(wav)
+        .file_name("dictation.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| e.to_string())?;
+    let form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("model", GROQ_STT_MODEL)
+        .text("language", "es")
+        .text("temperature", "0")
+        .text("response_format", "json");
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        state
+            .llm_client
+            .post(GROQ_STT_ENDPOINT)
+            .bearer_auth(key)
+            .multipart(form)
+            .send(),
+    )
+    .await
+    .map_err(|_| "Timeout de Groq STT".to_string())?
+    .map_err(|e| e.to_string())?
+    .error_for_status()
+    .map_err(|e| e.to_string())?;
+    let parsed: GroqTranscriptionResponse = response.json().await.map_err(|e| e.to_string())?;
+    Ok(parsed.text.trim().to_string())
+}
+
+fn transcribe_audio_local(state: &AppState, audio: &CapturedAudio) -> Result<String, String> {
+    let whisper_audio =
+        prepare_audio_for_whisper(&audio.samples, audio.sample_rate, audio.channels);
     let context = state
         .whisper
         .context
@@ -749,6 +1079,12 @@ fn transcribe_audio(state: &AppState) -> Result<String, String> {
         .create_state()
         .map_err(|error| format!("No se pudo crear WhisperState: {error}"))?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let n_threads = std::thread::available_parallelism()
+        .map(|n| (n.get() as i32).clamp(1, 16))
+        .unwrap_or(4);
+    params.set_n_threads(n_threads);
+    params.set_single_segment(true);
+    params.set_no_context(true);
     params.set_language(Some("es"));
     params.set_translate(false);
     params.set_print_special(false);
@@ -763,6 +1099,37 @@ fn transcribe_audio(state: &AppState) -> Result<String, String> {
         text.push_str(&segment.to_string());
     }
     Ok(text.trim().to_string())
+}
+
+fn encode_wav_pcm16(audio: &CapturedAudio) -> Vec<u8> {
+    let mono = mix_to_mono(&audio.samples, audio.channels);
+    let sample_rate = audio.sample_rate.max(1);
+    let bits_per_sample = 16u16;
+    let channels = 1u16;
+    let byte_rate = sample_rate * u32::from(channels) * u32::from(bits_per_sample) / 8;
+    let block_align = channels * bits_per_sample / 8;
+    let data_size = (mono.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_size as usize);
+
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_size).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&bits_per_sample.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_size.to_le_bytes());
+
+    for sample in mono {
+        let pcm = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        out.extend_from_slice(&pcm.to_le_bytes());
+    }
+    out
 }
 
 async fn transform_with_mode(
@@ -784,7 +1151,8 @@ async fn transform_with_mode(
         messages: vec![
             GroqMessage {
                 role: "system".to_string(),
-                content: "Eres un asistente experto en reescritura de texto en español.".to_string(),
+                content: "Eres un asistente experto en reescritura de texto en español."
+                    .to_string(),
             },
             GroqMessage {
                 role: "user".to_string(),
@@ -856,7 +1224,9 @@ async fn test_groq(state: tauri::State<'_, AppState>) -> Result<String, String> 
         .first()
         .map(|c| c.message.content.trim())
         .unwrap_or("");
-    Ok(format!("Groq respondió correctamente (modelo {model}). Vista previa: {reply}"))
+    Ok(format!(
+        "Groq respondió correctamente (modelo {model}). Vista previa: {reply}"
+    ))
 }
 
 fn mode_prompt(mode: Mode) -> &'static str {
@@ -900,6 +1270,61 @@ fn strip_whisper_brackets(text: &str) -> String {
         }
     }
     out
+}
+
+/// None cuando no hay habla útil: vacío, solo puntuación, o alucinaciones típicas de Whisper.
+fn meaningful_speech_from_whisper(raw: &str) -> Option<String> {
+    let cleaned = strip_whisper_brackets(raw).trim().to_string();
+    if cleaned.is_empty() {
+        return None;
+    }
+    if !cleaned.chars().any(|c| c.is_alphabetic()) {
+        return None;
+    }
+    let norm = normalize_text(&cleaned);
+    let collapsed: String = norm.split_whitespace().collect::<Vec<_>>().join(" ");
+    const HALLUC: &[&str] = &[
+        "music",
+        "musica",
+        "applause",
+        "aplauso",
+        "silence",
+        "silencio",
+        "no speech",
+        "sin habla",
+        "blank audio",
+        "noise",
+        "ruido",
+        "static",
+        "statics",
+        "inaudible",
+        "unintelligible",
+        "indistinct",
+        "subtitle",
+        "subtitles",
+        "subtitulos",
+        "thank you",
+        "thanks for watching",
+        "gracias por ver",
+        "subscribe",
+        "suscribete",
+    ];
+    if collapsed.len() <= 56 {
+        for h in HALLUC {
+            if collapsed == *h {
+                return None;
+            }
+        }
+    }
+    let words: Vec<&str> = collapsed.split_whitespace().collect();
+    if words.len() <= 3 {
+        for w in &words {
+            if HALLUC.iter().any(|&h| h == *w) {
+                return None;
+            }
+        }
+    }
+    Some(cleaned)
 }
 
 /// Normaliza para detectar comandos de voz aunque Whisper meta guiones, puntuación o ruido.
@@ -1257,7 +1682,8 @@ fn load_groq_api_key(state: &AppState) -> Result<String, String> {
         }
     }
     groq_key_from_file(&state.secrets_path).ok_or_else(|| {
-        "No hay API key de Groq guardada. Pégala en Settings, pulsa Guardar y prueba de nuevo.".to_string()
+        "No hay API key de Groq guardada. Pégala en Settings, pulsa Guardar y prueba de nuevo."
+            .to_string()
     })
 }
 
@@ -1290,6 +1716,7 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     if validate_model(&settings.model).is_err() {
         settings.model = DEFAULT_MODEL.to_string();
     }
+    settings.sound_effects_volume = settings.sound_effects_volume.clamp(0.0_f32, 1.0_f32);
     settings
 }
 
@@ -1402,10 +1829,7 @@ fn append_u16_samples(app: &tauri::AppHandle, data: &[u16]) {
                 .map(|sample| (*sample as f32 - 32768.0) / 32768.0),
         );
     }
-    emit_audio_level(
-        app,
-        data.iter().map(|s| (*s as f32 - 32768.0) / 32768.0),
-    );
+    emit_audio_level(app, data.iter().map(|s| (*s as f32 - 32768.0) / 32768.0));
 }
 
 fn emit_audio_level<I: Iterator<Item = f32>>(app: &tauri::AppHandle, samples: I) {
@@ -1599,11 +2023,134 @@ fn emit_dictation_processing(app: &tauri::AppHandle, active: bool) {
     );
 }
 
+fn emit_mushu_sound_prefs(app: &tauri::AppHandle, state: &AppState) {
+    let (enabled, vol) = match state.settings.lock() {
+        Ok(s) => (
+            s.sound_effects_enabled,
+            s.sound_effects_volume.clamp(0.0_f32, 1.0_f32),
+        ),
+        Err(_) => (true, 0.22_f32),
+    };
+    let _ = app.emit(
+        "mushu_sound_prefs",
+        serde_json::json!({ "enabled": enabled, "volume": vol }),
+    );
+}
+
+/// Tiempos desde que sueltas el atajo hasta cada fase (para medir latencia real).
+fn emit_dictation_latency(
+    app: &tauri::AppHandle,
+    whisper_ms: u64,
+    llm_ms: u64,
+    paste_ms: u64,
+    total_ms: u64,
+    phase: &str,
+) {
+    let _ = app.emit(
+        "dictation_latency",
+        serde_json::json!({
+            "whisper_ms": whisper_ms,
+            "llm_ms": llm_ms,
+            "paste_ms": paste_ms,
+            "total_ms": total_ms,
+            "phase": phase,
+        }),
+    );
+}
+
+fn log_pipeline_timing(
+    phase: &str,
+    transcription: &TranscriptionMetrics,
+    llm_ms: u64,
+    paste_ms: u64,
+    db_save_ms: u64,
+    total_ms: u64,
+) {
+    eprintln!(
+        "[mushu:latency] phase={phase} backend={} recording_duration_ms={} audio_duration_ms={} audio_bytes={} capture_audio_ms={} encode_audio_ms={} groq_stt_upload_and_transcribe_ms={} local_whisper_ms={} llm_transform_ms={} clipboard_or_paste_ms={} db_save_ms={} total_release_to_done_ms={}",
+        transcription.backend,
+        transcription.recording_duration_ms,
+        transcription.audio_duration_ms,
+        transcription.audio_bytes,
+        transcription.capture_ms,
+        transcription.encode_audio_ms,
+        transcription.groq_stt_upload_and_transcribe_ms,
+        transcription.local_whisper_ms,
+        llm_ms,
+        paste_ms,
+        db_save_ms,
+        total_ms,
+    );
+}
+
 fn emit_overlay_mode_banner(app: &tauri::AppHandle, active: bool) {
     let _ = app.emit(
         "overlay_mode_banner",
         serde_json::json!({ "active": active }),
     );
+}
+
+fn prewarm_groq(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let key = match load_groq_api_key(&state) {
+            Ok(key) => key,
+            Err(err) => {
+                eprintln!("[mushu:latency] groq_prewarm=skipped reason=\"{err}\"");
+                return;
+            }
+        };
+        let req = GroqRequest {
+            model: DEFAULT_MODEL.to_string(),
+            temperature: 0.0,
+            messages: vec![GroqMessage {
+                role: "user".to_string(),
+                content: "OK".to_string(),
+            }],
+            max_tokens: Some(1),
+        };
+        let t = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            state
+                .llm_client
+                .post(GROQ_CHAT_ENDPOINT)
+                .bearer_auth(key)
+                .json(&req)
+                .send(),
+        )
+        .await;
+        match result {
+            Ok(Ok(response)) if response.status().is_success() => {
+                eprintln!(
+                    "[mushu:latency] groq_prewarm=ok ms={}",
+                    t.elapsed().as_millis()
+                );
+            }
+            Ok(Ok(response)) => {
+                eprintln!(
+                    "[mushu:latency] groq_prewarm=failed status={} ms={}",
+                    response.status(),
+                    t.elapsed().as_millis()
+                );
+            }
+            Ok(Err(err)) => {
+                eprintln!(
+                    "[mushu:latency] groq_prewarm=failed error=\"{}\" ms={}",
+                    err,
+                    t.elapsed().as_millis()
+                );
+            }
+            Err(_) => {
+                eprintln!(
+                    "[mushu:latency] groq_prewarm=timeout ms={}",
+                    t.elapsed().as_millis()
+                );
+            }
+        }
+    });
 }
 
 async fn init_db(app: &tauri::AppHandle) -> Result<SqlitePool, String> {
@@ -1625,7 +2172,8 @@ async fn init_db(app: &tauri::AppHandle) -> Result<SqlitePool, String> {
 }
 
 fn setup_tray(app: &tauri::AppHandle, mode: Mode) -> Result<(), String> {
-    let open_i = MenuItem::with_id(app, "open", "Open", true, None::<&str>).map_err(|e| e.to_string())?;
+    let open_i =
+        MenuItem::with_id(app, "open", "Open", true, None::<&str>).map_err(|e| e.to_string())?;
     let mode_i = MenuItem::with_id(
         app,
         "mode_label",
@@ -1634,7 +2182,8 @@ fn setup_tray(app: &tauri::AppHandle, mode: Mode) -> Result<(), String> {
         None::<&str>,
     )
     .map_err(|e| e.to_string())?;
-    let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).map_err(|e| e.to_string())?;
+    let quit_i =
+        MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).map_err(|e| e.to_string())?;
     let menu = Menu::with_items(app, &[&open_i, &mode_i, &quit_i]).map_err(|e| e.to_string())?;
     TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
@@ -1750,6 +2299,7 @@ pub fn run() {
                 secrets_path,
             };
             app.manage(state);
+            prewarm_groq(app_handle.clone());
             setup_tray(&app_handle, settings.mode)?;
 
             app.handle()
@@ -1759,10 +2309,7 @@ pub fn run() {
                     map_shortcut_register_error(e.to_string(), &settings.hotkey, "de dictado")
                 })?;
             let mode_parsed = parse_shortcut(&settings.mode_hotkey)?;
-            if let Err(e) = app.handle()
-                .global_shortcut()
-                .register(mode_parsed)
-            {
+            if let Err(e) = app.handle().global_shortcut().register(mode_parsed) {
                 // No bloqueamos el arranque si el atajo de cambio de modo está ocupado por otra app.
                 let msg = map_shortcut_register_error(
                     e.to_string(),
@@ -1792,7 +2339,8 @@ pub fn run() {
             test_groq,
             get_history,
             clear_history,
-            copy_to_clipboard
+            copy_to_clipboard,
+            set_mode
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

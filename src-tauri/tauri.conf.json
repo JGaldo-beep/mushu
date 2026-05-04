@@ -14,11 +14,11 @@
     "windows": [
       {
         "label": "main",
-        "title": "mushu",
-        "width": 920,
-        "height": 680,
-        "minWidth": 820,
-        "minHeight": 560
+        "title": "Mushu",
+        "width": 960,
+        "height": 700,
+        "minWidth": 480,
+        "minHeight": 480
       },
       {
         "label": "overlay",
