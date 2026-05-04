@@ -43,6 +43,7 @@ export default defineConfig(async () => ({
       input: {
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
         overlay: fileURLToPath(new URL("./overlay.html", import.meta.url)),
+        explain: fileURLToPath(new URL("./explain.html", import.meta.url)),
       },
     },
   },

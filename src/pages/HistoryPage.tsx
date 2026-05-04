@@ -139,7 +139,7 @@ export function HistoryPage() {
 function HistoryRow({ item }: { item: HistoryItem }) {
   const modeName = item.mode_used as ModeName;
   const Icon = MODE_ICONS[MODE_ICONS_BY_NAME[modeName]] ?? MODE_ICONS.Mic;
-  const color = MODE_COLORS[modeName] ?? "#7C3AED";
+  const color = MODE_COLORS[modeName] ?? "#059669";
   const label = MODE_LABELS[modeName] ?? item.mode_used;
   return (
     <Card className="group relative p-4 transition-shadow hover:shadow-sm">

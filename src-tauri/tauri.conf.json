@@ -34,6 +34,21 @@
         "skipTaskbar": true,
         "focus": false,
         "shadow": false
+      },
+      {
+        "label": "explain",
+        "title": "",
+        "url": "explain.html",
+        "width": 900,
+        "height": 700,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "resizable": false,
+        "skipTaskbar": true,
+        "focus": false,
+        "shadow": false
       }
     ],
     "security": {

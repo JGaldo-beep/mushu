@@ -1,4 +1,5 @@
 import {
+  BookOpen,
   BriefcaseBusiness,
   CircleHelp,
   Code2,
@@ -20,6 +21,7 @@ export const MODE_ICONS: Record<ModeIconName, LucideIcon> = {
   CircleHelp,
   MessageSquareReply,
   Languages,
+  BookOpen,
 };
 
 export const MODE_LABELS: Record<ModeName, string> = {
@@ -30,18 +32,20 @@ export const MODE_LABELS: Record<ModeName, string> = {
   CODE: "Código",
   HELP: "Pregunta a Mushu",
   REPLY_EN: "Responder (EN)",
+  EXPLAIN: "Explicar",
   TRANSLATE: "Traducir",
 };
 
 export const MODE_COLORS: Record<ModeName, string> = {
-  DEFAULT: "#7C3AED",
+  DEFAULT: "#059669",
   EMAIL: "#3B82F6",
   FORMAL: "#8B5CF6",
   CASUAL: "#10B981",
   CODE: "#F59E0B",
   HELP: "#EC4899",
   REPLY_EN: "#06B6D4",
-  TRANSLATE: "#A78BFA",
+  EXPLAIN: "#0d9488",
+  TRANSLATE: "#0d9488",
 };
 
 export const MODE_ICONS_BY_NAME: Record<ModeName, ModeIconName> = {
@@ -52,6 +56,7 @@ export const MODE_ICONS_BY_NAME: Record<ModeName, ModeIconName> = {
   CODE: "Code2",
   HELP: "CircleHelp",
   REPLY_EN: "MessageSquareReply",
+  EXPLAIN: "BookOpen",
   TRANSLATE: "Languages",
 };
 
@@ -63,7 +68,7 @@ export const MODE_NAMES: ModeName[] = [
   "CODE",
   "HELP",
   "REPLY_EN",
-  "TRANSLATE",
+  "EXPLAIN",
 ];
 
 export const DEFAULT_MODE: ModeInfo = {
@@ -77,7 +82,7 @@ export function normalizeMode(m: Partial<ModeInfo> & { name: ModeName }): ModeIn
   return {
     name: m.name,
     label: m.label || MODE_LABELS[m.name] || m.name,
-    color: m.color || MODE_COLORS[m.name] || "#7C3AED",
+    color: m.color || MODE_COLORS[m.name] || "#059669",
     icon: m.icon || MODE_ICONS_BY_NAME[m.name] || "Mic",
   };
 }

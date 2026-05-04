@@ -6,6 +6,8 @@ export type ModeName =
   | "CODE"
   | "HELP"
   | "REPLY_EN"
+  | "EXPLAIN"
+  /** Historial guardado antes del cambio de modo */
   | "TRANSLATE";
 
 export type ModeIconName =
@@ -16,7 +18,8 @@ export type ModeIconName =
   | "Code2"
   | "CircleHelp"
   | "MessageSquareReply"
-  | "Languages";
+  | "Languages"
+  | "BookOpen";
 
 export type ModeInfo = {
   name: ModeName;
@@ -41,6 +44,7 @@ export type FrontendState = {
   theme: ThemePref;
   sound_effects_enabled: boolean;
   sound_effects_volume: number;
+  onboarding_completed: boolean;
 };
 
 export type SaveSettingsInput = {

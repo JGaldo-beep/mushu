@@ -378,7 +378,7 @@ export function SettingsPage() {
                   </div>
                   <p className="text-[11px] text-muted-foreground">
                     Necesaria solo para los modos avanzados (Pregunta a Mushu, Responder en
-                    inglés, Traducir). Se guarda cifrada en el llavero del sistema.
+                    inglés, Explicar). Se guarda cifrada en el llavero del sistema.
                   </p>
                   <div className="flex items-center gap-2">
                     <Input

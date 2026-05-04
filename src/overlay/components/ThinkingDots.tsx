@@ -7,9 +7,9 @@ export function ThinkingDots({ className }: { className?: string }) {
       role="status"
       aria-label="Procesando"
     >
-      <span className="size-1.5 animate-bounce rounded-full bg-violet-600 [animation-delay:-0.3s]" />
-      <span className="size-1.5 animate-bounce rounded-full bg-violet-600 [animation-delay:-0.15s]" />
-      <span className="size-1.5 animate-bounce rounded-full bg-violet-600" />
+      <span className="size-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+      <span className="size-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+      <span className="size-1.5 animate-bounce rounded-full bg-primary" />
     </div>
   );
 }

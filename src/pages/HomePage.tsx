@@ -103,7 +103,7 @@ export function HomePage() {
                   <ShineBorder
                     borderWidth={1}
                     duration={6}
-                    shineColor={["#7C3AED", "#A78BFA", "#EC4899"]}
+                    shineColor={["#047857", "#10b981", "#34d399"]}
                   />
                   <div className="mb-3 flex items-center justify-between gap-2">
                     <ModeChip mode={mode} />

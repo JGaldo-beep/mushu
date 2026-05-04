@@ -42,7 +42,8 @@ enigo = "0.2"
 whisper-rs = "0.16"
 
 # Descargar modelo Whisper + Groq API
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls", "stream"] }
+futures-util = "0.3"
 
 # Para manejar threads y estado compartido
 tokio = { version = "1", features = ["full"] }

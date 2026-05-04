@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
 import { tauri } from "@/lib/tauri";
 import type { FrontendState, SaveSettingsInput } from "@/lib/types";
@@ -25,6 +26,18 @@ export function useSettings() {
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen("frontend_state_changed", () => {
+      void load();
+    }).then((u) => {
+      unlisten = u;
+    });
+    return () => {
+      unlisten?.();
+    };
   }, [load]);
 
   const setField = useCallback(

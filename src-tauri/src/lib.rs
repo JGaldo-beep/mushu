@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{thread, vec};
+
+use futures_util::StreamExt;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
@@ -67,8 +69,9 @@ enum Mode {
     Help,
     /// Portapapeles = mensaje en inglés (p. ej. Reddit) + voz con instrucción → respuesta en inglés pegada.
     ReplyEn,
-    /// Traduce portapapeles (o el dictado si no hay copia) al español; resultado en overlay + portapapeles.
-    Translate,
+    /// Simula copiar selección (Ctrl+C), explica el texto en overlay dedicado con streaming Groq.
+    #[serde(alias = "TRANSLATE")]
+    Explain,
 }
 
 impl Mode {
@@ -81,7 +84,7 @@ impl Mode {
             Self::Code => "CODE",
             Self::Help => "HELP",
             Self::ReplyEn => "REPLY_EN",
-            Self::Translate => "TRANSLATE",
+            Self::Explain => "EXPLAIN",
         }
     }
 
@@ -94,7 +97,8 @@ impl Mode {
             "CODE" => Self::Code,
             "HELP" => Self::Help,
             "REPLY_EN" => Self::ReplyEn,
-            "TRANSLATE" => Self::Translate,
+            "EXPLAIN" => Self::Explain,
+            "TRANSLATE" => Self::Explain,
             _ => return None,
         })
     }
@@ -102,14 +106,14 @@ impl Mode {
     fn color(self) -> &'static str {
         match self {
             // Neutro legible en tema claro y oscuro (evita blanco sobre vidrio claro).
-            Self::Default => "#64748b",
+            Self::Default => "#059669",
             Self::Email => "#3B82F6",
             Self::Formal => "#8B5CF6",
             Self::Casual => "#10B981",
             Self::Code => "#F59E0B",
             Self::Help => "#F472B6",
             Self::ReplyEn => "#38BDF8",
-            Self::Translate => "#A78BFA",
+            Self::Explain => "#0d9488",
         }
     }
 
@@ -122,7 +126,7 @@ impl Mode {
             Self::Code => "Code2",
             Self::Help => "CircleHelp",
             Self::ReplyEn => "MessageSquareReply",
-            Self::Translate => "Languages",
+            Self::Explain => "BookOpen",
         }
     }
 }
@@ -147,7 +151,7 @@ impl From<Mode> for ModeInfo {
             Mode::Code => "Modo código",
             Mode::Help => "Modo ayuda",
             Mode::ReplyEn => "Modo responder (EN)",
-            Mode::Translate => "Modo traducir",
+            Mode::Explain => "Modo explicar",
         };
         Self {
             name: value.as_str().to_string(),
@@ -174,6 +178,8 @@ struct AppSettings {
     sound_effects_enabled: bool,
     #[serde(default = "default_sound_effects_volume")]
     sound_effects_volume: f32,
+    #[serde(default = "default_onboarding_completed_for_missing_key")]
+    onboarding_completed: bool,
 }
 
 impl Default for AppSettings {
@@ -188,6 +194,7 @@ impl Default for AppSettings {
             theme: AppTheme::default(),
             sound_effects_enabled: default_sound_effects_enabled(),
             sound_effects_volume: default_sound_effects_volume(),
+            onboarding_completed: false,
         }
     }
 }
@@ -234,6 +241,11 @@ fn default_mode_hotkey() -> String {
     DEFAULT_MODE_HOTKEY.to_string()
 }
 
+/// Clave ausente en `settings.json` antiguo: no mostrar onboarding de nuevo.
+fn default_onboarding_completed_for_missing_key() -> bool {
+    true
+}
+
 #[derive(Serialize)]
 struct FrontendState {
     mode: ModeInfo,
@@ -247,6 +259,7 @@ struct FrontendState {
     theme: String,
     sound_effects_enabled: bool,
     sound_effects_volume: f32,
+    onboarding_completed: bool,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -390,7 +403,26 @@ fn get_frontend_state(state: tauri::State<'_, AppState>) -> Result<FrontendState
         theme: settings.theme.as_str().to_string(),
         sound_effects_enabled: settings.sound_effects_enabled,
         sound_effects_volume: settings.sound_effects_volume,
+        onboarding_completed: settings.onboarding_completed,
     })
+}
+
+#[tauri::command]
+fn complete_onboarding(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<FrontendState, String> {
+    {
+        let mut settings = state
+            .settings
+            .lock()
+            .map_err(|_| "No se pudo bloquear settings".to_string())?;
+        settings.onboarding_completed = true;
+        save_settings_file(&app, &settings)?;
+    }
+    let out = get_frontend_state(state)?;
+    let _ = app.emit("frontend_state_changed", ());
+    Ok(out)
 }
 
 #[tauri::command]
@@ -612,6 +644,91 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
             }
         };
 
+        // Explicar: sin captura ni STT; copia la selección del foco anterior y abre ventana dedicada.
+        if settings.mode == Mode::Explain {
+            let t_explain = Instant::now();
+            if settings.processing_mode == ProcessingMode::LocalOnly {
+                emit_dictation_processing(&app_handle, false);
+                let _ = app_handle.emit(
+                    "transcription_error",
+                    "Este modo requiere nube (Groq). Cambia 'Modo de procesamiento' a 'Nube primero'.",
+                );
+                let _ = hide_overlay(&app_handle);
+                return;
+            }
+            let _ = hide_overlay(&app_handle);
+            if let Err(e) = simulate_copy_selection() {
+                emit_dictation_processing(&app_handle, false);
+                let _ = app_handle.emit("transcription_error", e);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            let selection = match read_clipboard_text() {
+                Ok(c) => truncate_for_groq(c.trim()),
+                Err(e) => {
+                    emit_dictation_processing(&app_handle, false);
+                    let _ = app_handle.emit(
+                        "transcription_error",
+                        format!("No se leyó el portapapeles: {e}"),
+                    );
+                    return;
+                }
+            };
+            if selection.trim().is_empty() {
+                emit_dictation_processing(&app_handle, false);
+                let _ = app_handle.emit(
+                    "transcription_error",
+                    "No hay texto seleccionado. Selecciona texto en la ventana activa y vuelve a soltar el atajo.",
+                );
+                return;
+            }
+            if let Err(e) = show_explain_window(&app_handle) {
+                emit_dictation_processing(&app_handle, false);
+                let _ = app_handle.emit("transcription_error", e);
+                return;
+            }
+            emit_explain_event(
+                &app_handle,
+                "explain_reset",
+                serde_json::json!({ "loading": true }),
+            );
+            emit_dictation_processing(&app_handle, false);
+
+            let app_spawn = app_handle.clone();
+            let model = settings.model.clone();
+            let sel = selection.clone();
+            let duration_for_db = duration_ms;
+            tauri::async_runtime::spawn(async move {
+                let state = app_spawn.state::<AppState>();
+                let t_llm = Instant::now();
+                let mut full_reply = String::new();
+                let stream_res =
+                    groq_explain_stream(&state, &model, &sel, &app_spawn, &mut full_reply).await;
+                let llm_ms = t_llm.elapsed().as_millis() as u64;
+                let total_ms = t_explain.elapsed().as_millis() as u64;
+                match stream_res {
+                    Ok(()) => {
+                        emit_explain_event(&app_spawn, "explain_done", serde_json::json!({}));
+                        let t_db = Instant::now();
+                        let _ = save_history(
+                            &state.db,
+                            &sel,
+                            &full_reply,
+                            Mode::Explain.as_str(),
+                            duration_for_db,
+                        )
+                        .await;
+                        let _db_ms = t_db.elapsed().as_millis() as u64;
+                        emit_dictation_latency(&app_spawn, 0, llm_ms, 0, total_ms, "explain");
+                    }
+                    Err(err) => {
+                        emit_explain_event(&app_spawn, "explain_error", err);
+                    }
+                }
+            });
+            return;
+        }
+
         let t_capture = Instant::now();
         let captured = match capture_audio(&state) {
             Ok(text) => text,
@@ -659,7 +776,7 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
         if settings.processing_mode == ProcessingMode::LocalOnly
             && (settings.mode == Mode::Help
                 || settings.mode == Mode::ReplyEn
-                || settings.mode == Mode::Translate)
+                || settings.mode == Mode::Explain)
         {
             emit_dictation_processing(&app_handle, false);
             let _ = app_handle.emit(
@@ -788,70 +905,6 @@ fn process_hotkey_release(app: &tauri::AppHandle) {
                 Err(err) => {
                     let _ = app_handle.emit("groq_error", &err);
                     emit_dictation_processing(&app_handle, false);
-                }
-            }
-            let _ = hide_overlay(&app_handle);
-            return;
-        }
-
-        if settings.mode == Mode::Translate {
-            let source = truncate_for_groq(raw_text.trim());
-            if source.trim().is_empty() {
-                emit_dictation_processing(&app_handle, false);
-                let _ = app_handle.emit(
-                    "transcription_error",
-                    "Dicta el texto que quieres traducir al español.",
-                );
-                let _ = hide_overlay(&app_handle);
-                return;
-            }
-            let t_llm = Instant::now();
-            match groq_translate_to_spanish(&state, &settings.model, &source).await {
-                Ok(translated) => {
-                    let llm_ms = t_llm.elapsed().as_millis() as u64;
-                    let t_clip = Instant::now();
-                    if let Err(e) = copy_text_only(&translated) {
-                        emit_dictation_processing(&app_handle, false);
-                        let _ = app_handle.emit("transcription_error", e);
-                        let _ = hide_overlay(&app_handle);
-                        return;
-                    }
-                    let paste_ms = t_clip.elapsed().as_millis() as u64;
-                    let t_db = Instant::now();
-                    let _ = save_history(
-                        &state.db,
-                        &raw_text,
-                        &translated,
-                        settings.mode.as_str(),
-                        duration_ms,
-                    )
-                    .await;
-                    let db_save_ms = t_db.elapsed().as_millis() as u64;
-                    emit_dictation_processing(&app_handle, false);
-                    let total_ms = t_pipeline.elapsed().as_millis() as u64;
-                    log_pipeline_timing(
-                        "translate",
-                        &transcription_metrics,
-                        llm_ms,
-                        paste_ms,
-                        db_save_ms,
-                        total_ms,
-                    );
-                    emit_dictation_latency(
-                        &app_handle,
-                        whisper_ms,
-                        llm_ms,
-                        paste_ms,
-                        total_ms,
-                        "translate",
-                    );
-                    let _ =
-                        app_handle.emit("mushu_reply", serde_json::json!({ "text": translated }));
-                    tokio::time::sleep(Duration::from_millis(2500)).await;
-                }
-                Err(err) => {
-                    emit_dictation_processing(&app_handle, false);
-                    let _ = app_handle.emit("groq_error", err);
                 }
             }
             let _ = hide_overlay(&app_handle);
@@ -1247,7 +1300,7 @@ fn mode_prompt(mode: Mode) -> &'static str {
         Mode::Code => {
             "Convierte la instrucción hablada en descripción técnica clara o comentario de código."
         }
-        Mode::Help | Mode::ReplyEn | Mode::Translate => {
+        Mode::Help | Mode::ReplyEn | Mode::Explain => {
             "Este modo se procesa en un flujo dedicado; no uses esta plantilla."
         }
     }
@@ -1360,7 +1413,7 @@ fn detect_pregunta_mushu(text: &str) -> Option<String> {
         if let Some(idx) = n.find(needle) {
             let rest = n[idx + needle.len()..].trim();
             let q = if rest.is_empty() {
-                "¿Qué modos tiene Mushu y cómo cambio de modo con el teclado? Responde en pocas frases."
+                "¿Qué modos tiene Mushu y dónde en la app se ve o cambia el modo activo? Responde en pocas frases."
                     .to_string()
             } else {
                 rest.to_string()
@@ -1389,10 +1442,11 @@ FORMATO DE RESPUESTA (obligatorio):
 - Ve al grano: qué hacer, en qué orden, o la respuesta directa.
 
 CONTEXTO RÁPIDO DE LA APP:
-Dictado local con Whisper; Groq puede reescribir según el modo. Modos: general, correo, formal, casual, código, ayuda (preguntas a ti), responder EN (clipboard en inglés + voz), traducir. El modo solo se cambia con el atajo de teclado configurado para “siguiente modo” (por defecto Ctrl+Shift+Espacio), nunca por frases en el dictado.
+Dictado local con Whisper; Groq puede reescribir según el modo. Modos: general, correo, formal, casual, código, ayuda (preguntas a ti), responder EN (clipboard en inglés + voz), explicar (texto seleccionado + resumen en overlay). El modo activo se cambia con el atajo global que el usuario configuró en Ajustes → Atajos de teclado (“Cambiar modo”); nunca por frases en el dictado.
 
 REGLAS:
 - Responde directo a la pregunta; nada de meta-instrucciones ("aquí tienes", "enumera", "devuelve la lista") sin contenido útil.
+- No cites atajos concretos (Ctrl, Cmd, etc.) salvo que el usuario los haya escrito en su pregunta: pueden cambiarse en Ajustes. Para atajos, di que los vea en Ajustes → Atajos de teclado.
 - Si preguntan qué modos hay, resume en una o dos frases los nombres y para qué sirven, sin ensayar.
 - Si no sabes algo, una sola frase honesta."#;
     let user_block = format!(
@@ -1516,8 +1570,8 @@ fn next_mode(mode: Mode) -> Mode {
         Mode::Casual => Mode::Code,
         Mode::Code => Mode::Help,
         Mode::Help => Mode::ReplyEn,
-        Mode::ReplyEn => Mode::Translate,
-        Mode::Translate => Mode::Default,
+        Mode::ReplyEn => Mode::Explain,
+        Mode::Explain => Mode::Default,
     }
 }
 
@@ -1534,13 +1588,6 @@ fn truncate_for_groq(s: &str) -> String {
         return s.to_string();
     }
     s.chars().take(CLIPBOARD_GROQ_MAX_CHARS).collect()
-}
-
-fn copy_text_only(text: &str) -> Result<(), String> {
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    clipboard
-        .set_text(text.to_string())
-        .map_err(|e| e.to_string())
 }
 
 async fn groq_english_reply_from_clipboard(
@@ -1595,52 +1642,173 @@ Tu salida debe ser ÚNICAMENTE el texto final de la respuesta en inglés, listo 
         .ok_or_else(|| "Respuesta vacía (inglés)".to_string())
 }
 
-async fn groq_translate_to_spanish(
+/// Envía Ctrl+C (o Cmd+C en macOS) al sistema para copiar la selección del foco actual.
+fn simulate_copy_selection() -> Result<(), String> {
+    let mut enigo = Enigo::new(&Settings::default())
+        .map_err(|error| format!("No se pudo inicializar enigo: {error}"))?;
+    #[cfg(target_os = "macos")]
+    {
+        enigo
+            .key(Key::Meta, Direction::Press)
+            .map_err(|e| format!("No se pudo presionar Cmd: {e}"))?;
+        enigo
+            .key(Key::C, Direction::Click)
+            .map_err(|e| format!("No se pudo presionar C: {e}"))?;
+        enigo
+            .key(Key::Meta, Direction::Release)
+            .map_err(|e| format!("No se pudo soltar Cmd: {e}"))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        enigo
+            .key(Key::Control, Direction::Press)
+            .map_err(|error| format!("No se pudo presionar Ctrl: {error}"))?;
+        enigo
+            .key(Key::C, Direction::Click)
+            .map_err(|error| format!("No se pudo presionar C: {error}"))?;
+        enigo
+            .key(Key::Control, Direction::Release)
+            .map_err(|error| format!("No se pudo soltar Ctrl: {error}"))?;
+    }
+    Ok(())
+}
+
+fn emit_explain_event(app: &tauri::AppHandle, event: &str, payload: impl Serialize + Clone) {
+    if let Some(w) = app.get_webview_window("explain") {
+        let _ = w.emit(event, payload);
+    }
+}
+
+fn show_explain_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("explain")
+        .ok_or_else(|| "Ventana explain no encontrada".to_string())?;
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let monitor_size = monitor.size();
+        let monitor_pos = monitor.position();
+        window
+            .set_size(tauri::PhysicalSize {
+                width: monitor_size.width,
+                height: monitor_size.height,
+            })
+            .map_err(|e| e.to_string())?;
+        window
+            .set_position(tauri::PhysicalPosition {
+                x: monitor_pos.x,
+                y: monitor_pos.y,
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    window.show().map_err(|e| e.to_string())?;
+    window.set_always_on_top(true).map_err(|e| e.to_string())?;
+    let _ = window.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
+fn close_explain_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("explain") {
+        w.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+async fn groq_explain_stream(
     state: &AppState,
     model: &str,
-    text: &str,
-) -> Result<String, String> {
+    user_text: &str,
+    app: &tauri::AppHandle,
+    full_out: &mut String,
+) -> Result<(), String> {
     validate_model(model)?;
     let key = load_groq_api_key(state)?;
-    const SYSTEM: &str = r#"El usuario dictó un texto (transcripción automática); puede estar en inglés u otro idioma.
-Tradúcelo al español natural (España o latino neutro según el original).
-Devuelve ÚNICAMENTE la traducción, sin comillas, sin prefijos, sin notas."#;
-    let req = GroqRequest {
-        model: model.to_string(),
-        temperature: 0.15,
-        messages: vec![
-            GroqMessage {
-                role: "system".to_string(),
-                content: SYSTEM.to_string(),
-            },
-            GroqMessage {
-                role: "user".to_string(),
-                content: text.to_string(),
-            },
-        ],
-        max_tokens: None,
-    };
+    const SYSTEM: &str = r#"Eres un asistente experto. El usuario comparte un texto que seleccionó en su pantalla.
+Explícalo de forma clara y concisa en el mismo idioma que el texto. Máximo unas 150 palabras.
+Ve directo al punto, sin saludos ni meta-comentarios."#;
+    let body = serde_json::json!({
+        "model": model,
+        "temperature": 0.35,
+        "max_tokens": 400,
+        "stream": true,
+        "messages": [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": user_text}
+        ]
+    });
     let response = tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(90),
         state
             .llm_client
-            .post("https://api.groq.com/openai/v1/chat/completions")
+            .post(GROQ_CHAT_ENDPOINT)
             .bearer_auth(key)
-            .json(&req)
+            .json(&body)
             .send(),
     )
     .await
-    .map_err(|_| "Timeout de Groq (traducir)".to_string())?
+    .map_err(|_| "Timeout de Groq (explicar)".to_string())?
     .map_err(|e| e.to_string())?
     .error_for_status()
     .map_err(|e| e.to_string())?;
-    let parsed: GroqResponse = response.json().await.map_err(|e| e.to_string())?;
-    parsed
-        .choices
-        .first()
-        .map(|c| c.message.content.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "Traducción vacía".to_string())
+
+    let mut stream = response.bytes_stream();
+    let mut line_buf = String::new();
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| e.to_string())?;
+        line_buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = line_buf.find('\n') {
+            let line = line_buf[..pos].trim_end_matches('\r').trim().to_string();
+            line_buf.drain(..=pos);
+            if line.is_empty() {
+                continue;
+            }
+            if line == "data: [DONE]" {
+                continue;
+            }
+            let Some(json_str) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) else {
+                continue;
+            };
+            let piece = v["choices"]
+                .get(0)
+                .and_then(|c| c["delta"]["content"].as_str())
+                .unwrap_or("");
+            if !piece.is_empty() {
+                full_out.push_str(piece);
+                emit_explain_event(
+                    app,
+                    "explain_chunk",
+                    serde_json::json!({ "content": piece }),
+                );
+            }
+        }
+    }
+    let tail = line_buf.trim();
+    if !tail.is_empty() {
+        if let Some(json_str) = tail.strip_prefix("data: ") {
+            if json_str != "[DONE]" {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    let piece = v["choices"]
+                        .get(0)
+                        .and_then(|c| c["delta"]["content"].as_str())
+                        .unwrap_or("");
+                    if !piece.is_empty() {
+                        full_out.push_str(piece);
+                        emit_explain_event(
+                            app,
+                            "explain_chunk",
+                            serde_json::json!({ "content": piece }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    if full_out.trim().is_empty() {
+        return Err("Respuesta vacía (explicar)".to_string());
+    }
+    Ok(())
 }
 
 fn paste_text(text: &str) -> Result<(), String> {
@@ -2340,7 +2508,9 @@ pub fn run() {
             get_history,
             clear_history,
             copy_to_clipboard,
-            set_mode
+            set_mode,
+            close_explain_window,
+            complete_onboarding
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

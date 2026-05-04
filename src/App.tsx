@@ -1,9 +1,11 @@
 import { AnimatePresence } from "framer-motion";
 import { useState } from "react";
+import { OnboardingWizard } from "@/components/onboarding/OnboardingWizard";
 import { PageTransition } from "@/components/layout/PageTransition";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useOnboarding } from "@/hooks/useOnboarding";
 import { useTheme } from "@/hooks/useTheme";
 import type { NavSection } from "@/lib/types";
 import { HistoryPage } from "@/pages/HistoryPage";
@@ -13,6 +15,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 function App() {
   const [section, setSection] = useState<NavSection>("home");
   const { theme, setTheme } = useTheme();
+  const onboarding = useOnboarding();
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -33,6 +36,15 @@ function App() {
           </AnimatePresence>
         </main>
         <Toaster richColors position="bottom-right" />
+        {!onboarding.loading && onboarding.open && onboarding.snapshot && (
+          <OnboardingWizard
+            hotkey={onboarding.snapshot.hotkey}
+            modeHotkey={onboarding.snapshot.mode_hotkey}
+            hasGroqKey={onboarding.snapshot.has_groq_key}
+            onComplete={onboarding.complete}
+            onNavigateSettings={setSection}
+          />
+        )}
       </div>
     </TooltipProvider>
   );

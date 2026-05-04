@@ -3,6 +3,7 @@ import type { FrontendState, HistoryItem, ModeName, SaveSettingsInput } from "./
 
 export const tauri = {
   getFrontendState: () => invoke<FrontendState>("get_frontend_state"),
+  completeOnboarding: () => invoke<FrontendState>("complete_onboarding"),
   saveSettings: (input: SaveSettingsInput) => invoke<FrontendState>("save_settings", { input }),
   saveGroqApiKey: (key: string) => invoke<void>("save_groq_api_key", { key }),
   testGroq: () => invoke<string>("test_groq"),
