@@ -1,14 +1,20 @@
-import { motion } from "framer-motion";
+import { motion, useIsPresent } from "framer-motion";
 import type { ReactNode } from "react";
 
 export function PageTransition({ children }: { children: ReactNode }) {
+  const isPresent = useIsPresent();
+
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -6 }}
-      transition={{ duration: 0.22, ease: [0.33, 1, 0.68, 1] }}
-      className="h-full min-h-0"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.14, ease: "easeOut" }}
+      style={
+        isPresent
+          ? { height: "100%", minHeight: 0 }
+          : { position: "absolute", inset: 0 }
+      }
     >
       {children}
     </motion.div>

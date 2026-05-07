@@ -1,20 +1,19 @@
 import type { ThemePref } from "./types";
 
-export function resolveTheme(pref: ThemePref): "light" | "dark" {
-  if (pref === "light") return "light";
-  if (pref === "dark") return "dark";
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+/**
+ * Mushu is a light-only app. The theme preference still exists in the settings
+ * payload (backend compat), but the UI never applies the `.dark` class.
+ */
+export function resolveTheme(_pref: ThemePref): "light" {
+  return "light";
 }
 
-export function applyTheme(pref: ThemePref) {
-  const resolved = resolveTheme(pref);
+export function applyTheme(_pref: ThemePref) {
   const root = document.documentElement;
-  root.classList.toggle("dark", resolved === "dark");
-  root.dataset.theme = resolved;
+  root.classList.remove("dark");
+  root.dataset.theme = "light";
 }
 
-export function watchSystemTheme(onChange: () => void) {
-  const mq = window.matchMedia("(prefers-color-scheme: dark)");
-  mq.addEventListener("change", onChange);
-  return () => mq.removeEventListener("change", onChange);
+export function watchSystemTheme(_onChange: () => void) {
+  return () => {};
 }

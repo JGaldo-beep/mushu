@@ -1,75 +1,37 @@
-import {
-  BookOpen,
-  BriefcaseBusiness,
-  CircleHelp,
-  Code2,
-  Languages,
-  Mail,
-  MessageCircle,
-  MessageSquareReply,
-  Mic,
-  type LucideIcon,
-} from "lucide-react";
+import { Mail, Mic, StickyNote, type LucideIcon } from "lucide-react";
 import type { ModeIconName, ModeInfo, ModeName } from "./types";
 
 export const MODE_ICONS: Record<ModeIconName, LucideIcon> = {
   Mic,
   Mail,
-  BriefcaseBusiness,
-  MessageCircle,
-  Code2,
-  CircleHelp,
-  MessageSquareReply,
-  Languages,
-  BookOpen,
+  StickyNote,
 };
 
 export const MODE_LABELS: Record<ModeName, string> = {
   DEFAULT: "General",
   EMAIL: "Correo",
-  FORMAL: "Formal",
-  CASUAL: "Casual",
-  CODE: "Código",
-  HELP: "Pregunta a Mushu",
-  REPLY_EN: "Responder (EN)",
-  EXPLAIN: "Explicar",
-  TRANSLATE: "Traducir",
+  NOTE: "Nota",
+};
+
+export const MODE_DESCRIPTIONS: Record<ModeName, string> = {
+  DEFAULT: "Transcripción limpia, sin retoques.",
+  EMAIL: "Tono formal y párrafos estructurados.",
+  NOTE: "Casual, viñetas y fragmentos permitidos.",
 };
 
 export const MODE_COLORS: Record<ModeName, string> = {
-  DEFAULT: "#059669",
-  EMAIL: "#3B82F6",
-  FORMAL: "#8B5CF6",
-  CASUAL: "#10B981",
-  CODE: "#F59E0B",
-  HELP: "#EC4899",
-  REPLY_EN: "#06B6D4",
-  EXPLAIN: "#0d9488",
-  TRANSLATE: "#0d9488",
+  DEFAULT: "#d1ff3a",
+  EMAIL: "#5fb5d8",
+  NOTE: "#cfc0e5",
 };
 
 export const MODE_ICONS_BY_NAME: Record<ModeName, ModeIconName> = {
   DEFAULT: "Mic",
   EMAIL: "Mail",
-  FORMAL: "BriefcaseBusiness",
-  CASUAL: "MessageCircle",
-  CODE: "Code2",
-  HELP: "CircleHelp",
-  REPLY_EN: "MessageSquareReply",
-  EXPLAIN: "BookOpen",
-  TRANSLATE: "Languages",
+  NOTE: "StickyNote",
 };
 
-export const MODE_NAMES: ModeName[] = [
-  "DEFAULT",
-  "EMAIL",
-  "FORMAL",
-  "CASUAL",
-  "CODE",
-  "HELP",
-  "REPLY_EN",
-  "EXPLAIN",
-];
+export const MODE_NAMES: ModeName[] = ["DEFAULT", "EMAIL", "NOTE"];
 
 export const DEFAULT_MODE: ModeInfo = {
   name: "DEFAULT",
@@ -78,11 +40,27 @@ export const DEFAULT_MODE: ModeInfo = {
   icon: "Mic",
 };
 
-export function normalizeMode(m: Partial<ModeInfo> & { name: ModeName }): ModeInfo {
+const KNOWN_MODES = new Set<string>(MODE_NAMES);
+
+/** Returns a fully-populated ModeInfo, falling back to DEFAULT for unknown names. */
+export function normalizeMode(m: Partial<ModeInfo> & { name?: string }): ModeInfo {
+  const name = (m.name && KNOWN_MODES.has(m.name) ? m.name : "DEFAULT") as ModeName;
   return {
-    name: m.name,
-    label: m.label || MODE_LABELS[m.name] || m.name,
-    color: m.color || MODE_COLORS[m.name] || "#059669",
-    icon: m.icon || MODE_ICONS_BY_NAME[m.name] || "Mic",
+    name,
+    label: m.label || MODE_LABELS[name],
+    color: m.color || MODE_COLORS[name],
+    icon: m.icon || MODE_ICONS_BY_NAME[name],
   };
+}
+
+/** Display label for any mode string (including legacy ones from old history). */
+export function modeLabel(name: string): string {
+  if (name in MODE_LABELS) return MODE_LABELS[name as ModeName];
+  return name; // legacy / unknown — show raw
+}
+
+/** Display color for any mode string. */
+export function modeColor(name: string): string {
+  if (name in MODE_COLORS) return MODE_COLORS[name as ModeName];
+  return "#8a8a95";
 }

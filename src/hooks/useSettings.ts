@@ -60,8 +60,10 @@ export function useSettings() {
       const input: SaveSettingsInput = {
         hotkey: draft.hotkey,
         mode_hotkey: draft.mode_hotkey,
+        pause_hotkey: draft.pause_hotkey,
         model: draft.model,
         processing_mode: draft.processing_mode,
+        transcription_provider: draft.transcription_provider,
         microphone: draft.selected_microphone,
         theme: fresh.theme,
         sound_effects_enabled: draft.sound_effects_enabled,

@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
+import { Pause, Pin } from "lucide-react";
 import { ModeBadge } from "@/overlay/components/ModeBadge";
 import { MushuReplyCard } from "@/overlay/components/MushuReplyCard";
 import { ThinkingDots } from "@/overlay/components/ThinkingDots";
@@ -12,6 +13,7 @@ const transition = { duration: 0.22, ease } as const;
 
 export function Overlay() {
   const {
+    surface,
     mode,
     modeBannerOnly,
     mushuReplyText,
@@ -22,14 +24,15 @@ export function Overlay() {
     showThinking,
     transcriptionFadeOut,
     audioLevelActive,
+    isHandsOff,
+    isPaused,
   } = useOverlayState();
 
   const audioLevel = useAudioLevel(audioLevelActive);
   const waveIdle = audioLevel < 0.04;
-  const routeHelp = mode.name === "HELP";
 
   return (
-    <div className="flex h-full w-full items-center justify-center bg-transparent p-1">
+    <div className="flex h-full w-full items-center justify-center p-1">
       <AnimatePresence mode="wait">
         {showPill && (
           <motion.div
@@ -44,7 +47,7 @@ export function Overlay() {
             className={cn(
               "overlay-pill-surface text-foreground",
               isReply ? "w-full max-w-[min(100%,408px)]" : "w-fit max-w-full min-w-0",
-              !isReply && (routeHelp ? "overlay-route-help" : "overlay-route-dict"),
+              !isReply && "overlay-route-dict",
             )}
           >
             <AnimatePresence mode="wait">
@@ -76,8 +79,8 @@ export function Overlay() {
                   {!modeBannerOnly && (
                     <div
                       className={cn(
-                        "flex min-h-8 shrink-0 items-center",
-                        isProcessing ? "min-w-[52px] justify-center" : "min-w-[40px] justify-end",
+                        "flex min-h-8 shrink-0 items-center gap-1.5",
+                        isProcessing ? "min-w-[52px] justify-center" : "min-w-[100px] justify-end",
                       )}
                     >
                       {isProcessing ? (
@@ -86,8 +89,40 @@ export function Overlay() {
                         ) : (
                           <span className="inline-block min-h-4 min-w-10" aria-hidden />
                         )
+                      ) : isPaused ? (
+                        <motion.span
+                          initial={{ opacity: 0, scale: 0.7 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.7 }}
+                          transition={transition}
+                          title="Pausado — toca el atajo de pausa para reanudar"
+                          style={{
+                            color: mode.color,
+                            lineHeight: 0,
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            minWidth: 32,
+                          }}
+                        >
+                          <Pause size={14} strokeWidth={2.5} />
+                        </motion.span>
                       ) : (
-                        <WaveBars level={audioLevel} color={mode.color} idle={waveIdle} />
+                        <>
+                          {isHandsOff && (
+                            <motion.span
+                              initial={{ opacity: 0, scale: 0.7 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              exit={{ opacity: 0, scale: 0.7 }}
+                              transition={transition}
+                              title="Hands-off activo — toca el atajo para detener"
+                              style={{ color: mode.color, lineHeight: 0 }}
+                            >
+                              <Pin size={12} strokeWidth={2.5} />
+                            </motion.span>
+                          )}
+                          <WaveBars level={audioLevel} color={mode.color} idle={waveIdle} />
+                        </>
                       )}
                     </div>
                   )}

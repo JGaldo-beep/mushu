@@ -1,0 +1,166 @@
+/* ============================================================
+   Mushu Design Tokens — Abyss palette (dark teal + lime accent)
+   Inspired by daisyUI's "abyss" theme.
+   Import AFTER index.css in main.tsx
+   ============================================================ */
+
+/* Base typography */
+body {
+  font-family: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  font-weight: 450;
+  font-feature-settings: "ss01", "cv11";
+  letter-spacing: -0.005em;
+  color: oklch(90% 0.076 70.697);
+}
+
+/* Force abyss theme — single source of truth for surface tokens */
+:root {
+  color-scheme: dark;
+
+  /* Core UI */
+  --background: transparent;             /* AppShell paints the bg */
+  --foreground: oklch(90% 0.076 70.697); /* warm cream */
+  --card: rgba(255, 255, 255, 0.05);
+  --card-foreground: oklch(90% 0.076 70.697);
+  --popover: oklch(15% 0.08 209 / 0.94);
+  --popover-foreground: oklch(90% 0.076 70.697);
+
+  /* Brand — bright lime / chartreuse */
+  --primary: oklch(92% 0.2653 125);
+  --primary-foreground: oklch(20% 0.08 209);
+  --accent: oklch(92% 0.2653 125 / 0.12);
+  --accent-foreground: oklch(92% 0.2653 125);
+
+  /* Neutrals */
+  --secondary: rgba(255, 255, 255, 0.07);
+  --secondary-foreground: oklch(90% 0.076 70.697);
+  --muted: rgba(255, 255, 255, 0.04);
+  --muted-foreground: rgba(243, 231, 201, 0.55);
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.06);
+  --ring: oklch(92% 0.2653 125 / 0.40);
+
+  /* Sidebar — slightly more opaque dark teal for weight */
+  --sidebar: oklch(15% 0.08 209 / 0.62);
+  --sidebar-background: oklch(15% 0.08 209 / 0.62);
+  --sidebar-foreground: rgba(243, 231, 201, 0.62);
+  --sidebar-primary: oklch(92% 0.2653 125);
+  --sidebar-primary-foreground: oklch(20% 0.08 209);
+  --sidebar-accent: oklch(92% 0.2653 125 / 0.12);
+  --sidebar-accent-foreground: oklch(92% 0.2653 125);
+  --sidebar-border: rgba(255, 255, 255, 0.06);
+  --sidebar-ring: oklch(92% 0.2653 125 / 0.40);
+
+  /* Custom Mushu tokens */
+  --accent-primary: #d1ff3a;
+  --accent-secondary: #e7ff7a;
+  --accent-hover: #b8e62a;
+  --accent-deep: #8fb800;
+  --glass-bg: rgba(255, 255, 255, 0.05);
+  --glass-bg-strong: rgba(255, 255, 255, 0.10);
+  --glass-bg-subtle: rgba(255, 255, 255, 0.025);
+  --glass-border: rgba(255, 255, 255, 0.10);     /* top inner highlight */
+  --glass-border-outer: rgba(255, 255, 255, 0.07);
+  --glass-border-accent: rgba(209, 255, 58, 0.35);
+  --text-primary: #f3e7c9;
+  --text-secondary: rgba(243, 231, 201, 0.62);
+  --text-muted: rgba(243, 231, 201, 0.38);
+  --delta-green: oklch(79% 0.209 151.711);
+  --delta-red: oklch(65% 0.1985 24.22);
+
+  /* Destructive */
+  --destructive: oklch(65% 0.1985 24.22);
+  --destructive-foreground: oklch(98% 0 0);
+}
+
+/* Sidebar backdrop blur */
+[data-sidebar="sidebar"] {
+  backdrop-filter: blur(20px) saturate(140%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(140%) !important;
+}
+
+/* Active sidebar item: left accent border */
+[data-sidebar="menu-button"][data-active="true"] {
+  border-left: 2px solid var(--accent-primary) !important;
+  border-radius: 0 8px 8px 0 !important;
+  padding-left: calc(0.5rem - 2px) !important;
+}
+
+/* Sidebar group label: Space Mono */
+[data-sidebar="group-label"] {
+  font-family: 'Space Mono', ui-monospace, monospace !important;
+  font-size: 9px !important;
+  letter-spacing: 0.1em !important;
+  text-transform: uppercase !important;
+  color: var(--text-muted) !important;
+}
+
+/* Subtle scrollbar (light over dark bg) */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+/* Pulse animation for active mode dot */
+@keyframes mushu-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+.animate-mode-pulse {
+  animation: mushu-pulse 2.4s ease-in-out infinite;
+}
+
+/* Topbar glass style — subtle dark band */
+.mushu-topbar {
+  background: rgba(0, 0, 0, 0.18);
+  border-bottom: 0.5px solid var(--glass-border-outer);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+}
+
+/* Glass input */
+.glass-input {
+  background: var(--glass-bg) !important;
+  border: 0.5px solid var(--glass-border-outer) !important;
+  color: var(--text-primary) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.glass-input::placeholder {
+  color: var(--text-muted) !important;
+}
+.glass-input:focus {
+  border-color: var(--glass-border-accent) !important;
+  box-shadow: 0 0 0 3px oklch(92% 0.2653 125 / 0.18) !important;
+  outline: none !important;
+}
+
+/* Glass button */
+.glass-btn {
+  background: var(--glass-bg);
+  border: 0.5px solid var(--glass-border-outer);
+  color: var(--text-secondary);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.glass-btn:hover {
+  background: oklch(92% 0.2653 125 / 0.12);
+  border-color: var(--glass-border-accent);
+  color: var(--accent-primary);
+}
+
+/* Tabular numbers */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}

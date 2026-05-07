@@ -18,14 +18,16 @@
         "width": 960,
         "height": 700,
         "minWidth": 480,
-        "minHeight": 480
+        "minHeight": 480,
+        "decorations": false,
+        "additionalBrowserArgs": "--enable-features=CSSBackdropFilter"
       },
       {
         "label": "overlay",
-        "title": "",
+        "title": "Mushu Overlay",
         "url": "overlay.html",
         "width": 440,
-        "height": 260,
+        "height": 112,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

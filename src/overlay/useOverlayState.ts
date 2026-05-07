@@ -91,6 +91,8 @@ export function useOverlayState() {
   const [modePopToken, setModePopToken] = useState(0);
   const [showThinking, setShowThinking] = useState(false);
   const [transcriptionFadeOut, setTranscriptionFadeOut] = useState(false);
+  const [isHandsOff, setIsHandsOff] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
 
   const soundEnabledRef = useRef(true);
   const soundVolumeRef = useRef(0.22);
@@ -157,7 +159,10 @@ export function useOverlayState() {
         setMushuReplyText(null);
         setModeBannerOnly(false);
         setTranscriptionFadeOut(false);
-        setMode(parseModePayload(event.payload));
+        setIsHandsOff(false);
+        setIsPaused(false);
+        const mode = parseModePayload(event.payload);
+        setMode(mode);
         setSurface("recording");
         playChime("start", soundEnabledRef.current, soundVolumeRef.current);
       }),
@@ -215,6 +220,32 @@ export function useOverlayState() {
     unsubs.push(
       listen("recording_stopped", () => {
         playChime("stop", soundEnabledRef.current, soundVolumeRef.current);
+      }),
+    );
+
+    unsubs.push(
+      listen("dictation_cancelled", () => {
+        cancelThinkPhase();
+        cancelMushuHide();
+        cancelTranscriptionExit();
+        setMushuReplyText(null);
+        setModeBannerOnly(false);
+        setTranscriptionFadeOut(false);
+        setIsHandsOff(false);
+        setIsPaused(false);
+        setSurface("hidden");
+      }),
+    );
+
+    unsubs.push(
+      listen("hands_off_changed", (event) => {
+        setIsHandsOff(Boolean(event.payload));
+      }),
+    );
+
+    unsubs.push(
+      listen("dictation_paused", (event) => {
+        setIsPaused(Boolean(event.payload));
       }),
     );
 
@@ -283,5 +314,7 @@ export function useOverlayState() {
     showThinking,
     transcriptionFadeOut,
     audioLevelActive,
+    isHandsOff,
+    isPaused,
   };
 }

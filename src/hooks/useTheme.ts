@@ -37,8 +37,10 @@ export function useTheme() {
       const input: SaveSettingsInput = {
         hotkey: state.hotkey,
         mode_hotkey: state.mode_hotkey,
+        pause_hotkey: state.pause_hotkey,
         model: state.model,
         processing_mode: state.processing_mode,
+        transcription_provider: state.transcription_provider,
         microphone: state.selected_microphone,
         theme: next,
         sound_effects_enabled: state.sound_effects_enabled,

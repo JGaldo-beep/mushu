@@ -1,8 +1,9 @@
 import { History as HistoryIcon, Search, Trash2 } from "lucide-react";
+import { Skeleton } from "@/components/Skeleton";
 import { useMemo, useState } from "react";
 import { CopyButton } from "@/components/CopyButton";
+import { GlassCard } from "@/components/GlassCard";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -12,11 +13,21 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { useHistory } from "@/hooks/useHistory";
-import { MODE_COLORS, MODE_ICONS, MODE_ICONS_BY_NAME, MODE_LABELS } from "@/lib/modes";
+import { SidebarTrigger } from "@/components/ui/sidebar";
+import { useHistoryContext } from "@/context/HistoryContext";
+import {
+  MODE_ICONS,
+  MODE_ICONS_BY_NAME,
+  modeColor,
+  modeLabel,
+} from "@/lib/modes";
 import type { HistoryItem, ModeName } from "@/lib/types";
+
+interface HistoryPageProps {
+  /** When true, render inside a Sheet (no SidebarTrigger, no global topbar). */
+  embedded?: boolean;
+}
 
 function formatTimestamp(iso: string) {
   const d = new Date(iso);
@@ -29,12 +40,37 @@ function formatTimestamp(iso: string) {
 }
 
 function formatDuration(ms: number) {
-  if (ms < 1000) return `${ms} ms`;
-  return `${(ms / 1000).toFixed(1)} s`;
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
-export function HistoryPage() {
-  const { items, loading, clear } = useHistory();
+function groupByDate(items: HistoryItem[]) {
+  const groups: { label: string; items: HistoryItem[] }[] = [];
+  const map = new Map<string, HistoryItem[]>();
+  for (const item of items) {
+    const d = new Date(item.timestamp);
+    const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+    let key: string;
+    if (d.toDateString() === today.toDateString()) {
+      key = `Hoy — ${d.toLocaleDateString("es-ES", { day: "2-digit", month: "long" })}`;
+    } else if (d.toDateString() === yesterday.toDateString()) {
+      key = `Ayer — ${d.toLocaleDateString("es-ES", { day: "2-digit", month: "long" })}`;
+    } else {
+      key = d.toLocaleDateString("es-ES", { weekday: "long", day: "2-digit", month: "long" });
+    }
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(item);
+  }
+  for (const [label, items] of map) {
+    groups.push({ label, items });
+  }
+  return groups;
+}
+
+export function HistoryPage({ embedded = false }: HistoryPageProps = {}) {
+  const { items, loading, clear } = useHistoryContext();
   const [query, setQuery] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
 
@@ -45,90 +81,187 @@ export function HistoryPage() {
       (i) =>
         i.processed_text.toLowerCase().includes(q) ||
         i.raw_text.toLowerCase().includes(q) ||
-        (MODE_LABELS[i.mode_used as ModeName] ?? "").toLowerCase().includes(q),
+        modeLabel(i.mode_used).toLowerCase().includes(q),
     );
   }, [items, query]);
 
+  const groups = useMemo(() => groupByDate(filtered), [filtered]);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="border-b border-border bg-background/40 px-6 py-5 backdrop-blur">
-        <div className="mx-auto max-w-3xl">
-          <div className="flex items-end justify-between gap-3">
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight">Historial</h1>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                Tus últimas transcripciones, guardadas en este equipo.
-              </p>
-            </div>
-            <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-              <DialogTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="gap-1.5 text-muted-foreground hover:text-destructive"
-                  disabled={!items.length}
-                >
-                  <Trash2 className="size-3.5" />
-                  Borrar todo
-                </Button>
-              </DialogTrigger>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>¿Borrar el historial?</DialogTitle>
-                  <DialogDescription>
-                    Esta acción elimina todas las transcripciones guardadas. No se puede deshacer.
-                  </DialogDescription>
-                </DialogHeader>
-                <DialogFooter>
-                  <Button variant="outline" onClick={() => setConfirmOpen(false)}>
-                    Cancelar
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    onClick={async () => {
-                      await clear();
-                      setConfirmOpen(false);
-                    }}
-                  >
-                    Borrar
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+      {/* Topbar */}
+      <div
+        className={
+          embedded
+            ? "flex items-center justify-between gap-4 px-5 py-4"
+            : "mushu-topbar flex items-center justify-between gap-4 px-5 py-3"
+        }
+        style={{
+          flexShrink: 0,
+          borderBottom: embedded ? "0.5px solid var(--glass-border-outer)" : undefined,
+        }}
+      >
+        <div className="flex items-center gap-3">
+          {!embedded && <SidebarTrigger style={{ color: "var(--text-secondary)" }} />}
+          <div>
+            <p
+              style={{
+                fontFamily: "'Geist Variable', sans-serif",
+                fontSize: "16px",
+                fontWeight: 600,
+                color: "var(--text-primary)",
+                lineHeight: 1.2,
+                letterSpacing: "-0.01em",
+              }}
+            >
+              Historial
+            </p>
+            <p
+              style={{
+                fontFamily: "'Geist Variable', sans-serif",
+                fontSize: "12px",
+                fontWeight: 450,
+                color: "var(--text-muted)",
+              }}
+            >
+              Tus últimas transcripciones
+            </p>
           </div>
-
-          <div className="relative mt-4">
-            <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <Search
+              style={{
+                position: "absolute",
+                left: "10px",
+                top: "50%",
+                transform: "translateY(-50%)",
+                width: "14px",
+                height: "14px",
+                color: "var(--text-muted)",
+                pointerEvents: "none",
+              }}
+            />
+            <input
               type="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Buscar en el historial…"
-              className="pl-9"
+              placeholder="Buscar…"
+              className="glass-input rounded-lg"
+              style={{
+                paddingLeft: "32px",
+                paddingRight: "12px",
+                paddingTop: "7px",
+                paddingBottom: "7px",
+                width: "180px",
+                fontSize: "13px",
+                fontFamily: "'Geist Variable', sans-serif",
+                fontWeight: 450,
+                outline: "none",
+              }}
             />
           </div>
+          <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className="glass-btn rounded-lg p-2"
+                disabled={!items.length}
+                style={{ opacity: !items.length ? 0.4 : 1 }}
+                title="Borrar todo el historial"
+              >
+                <Trash2 style={{ width: "15px", height: "15px" }} strokeWidth={1.85} />
+              </button>
+            </DialogTrigger>
+            <DialogContent
+              style={{
+                background: "oklch(15% 0.08 209 / 0.96)",
+                border: "0.5px solid var(--glass-border)",
+                backdropFilter: "blur(20px) saturate(140%)",
+                color: "var(--text-primary)",
+                boxShadow: "inset 0 1px 0 rgba(255,255,255,0.08), 0 12px 40px rgba(0,0,0,0.50)",
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle style={{ color: "var(--text-primary)" }}>
+                  ¿Borrar el historial?
+                </DialogTitle>
+                <DialogDescription style={{ color: "var(--text-secondary)" }}>
+                  Esta acción elimina todas las transcripciones. No se puede deshacer.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setConfirmOpen(false)}>
+                  Cancelar
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={async () => {
+                    await clear();
+                    setConfirmOpen(false);
+                  }}
+                >
+                  Borrar
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="mx-auto max-w-3xl px-6 py-5">
+        <div className="px-5 py-4">
           {loading && (
-            <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
-              Cargando…
+            <div className="flex flex-col gap-2">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Skeleton key={i} style={{ height: "72px" }} />
+              ))}
             </div>
           )}
           {!loading && items.length === 0 && <EmptyState />}
           {!loading && items.length > 0 && filtered.length === 0 && (
-            <p className="py-12 text-center text-sm text-muted-foreground">No hay coincidencias.</p>
+            <p
+              className="py-12 text-center"
+              style={{
+                fontFamily: "'Geist Variable', sans-serif",
+                fontSize: "14px",
+                fontWeight: 450,
+                color: "var(--text-muted)",
+              }}
+            >
+              No hay coincidencias.
+            </p>
           )}
-          {!loading && filtered.length > 0 && (
-            <ul className="flex flex-col gap-2">
-              {filtered.map((item) => (
-                <li key={item.id}>
-                  <HistoryRow item={item} />
-                </li>
+          {!loading && groups.length > 0 && (
+            <div className="flex flex-col gap-6">
+              {groups.map((group) => (
+                <div key={group.label}>
+                  <div
+                    className="mb-3 pb-2"
+                    style={{ borderBottom: "0.5px solid var(--glass-border-outer)" }}
+                  >
+                    <span
+                      style={{
+                        fontFamily: "'Space Mono', monospace",
+                        fontSize: "10px",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.1em",
+                        color: "var(--text-muted)",
+                      }}
+                    >
+                      {group.label}
+                    </span>
+                  </div>
+                  <ul className="flex flex-col gap-2">
+                    {group.items.map((item) => (
+                      <li key={item.id}>
+                        <HistoryRow item={item} />
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ))}
-            </ul>
+            </div>
           )}
         </div>
       </ScrollArea>
@@ -137,24 +270,37 @@ export function HistoryPage() {
 }
 
 function HistoryRow({ item }: { item: HistoryItem }) {
-  const modeName = item.mode_used as ModeName;
-  const Icon = MODE_ICONS[MODE_ICONS_BY_NAME[modeName]] ?? MODE_ICONS.Mic;
-  const color = MODE_COLORS[modeName] ?? "#059669";
-  const label = MODE_LABELS[modeName] ?? item.mode_used;
+  const Icon =
+    MODE_ICONS[MODE_ICONS_BY_NAME[item.mode_used as ModeName] ?? "Mic"] ?? MODE_ICONS.Mic;
+  const color = modeColor(item.mode_used);
+  const label = modeLabel(item.mode_used);
+  const words = item.processed_text.split(/\s+/).filter(Boolean).length;
+
   return (
-    <Card className="group relative p-4 transition-shadow hover:shadow-sm">
+    <GlassCard className="group p-4 transition-all" style={{ cursor: "default" }}>
       <div className="mb-2 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span
-            className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium"
-            style={{ borderColor: `${color}55`, color }}
+            className="inline-flex items-center gap-1 rounded-full px-2 py-0.5"
+            style={{
+              background: `${color}14`,
+              border: `0.5px solid ${color}40`,
+              color,
+              fontSize: "10.5px",
+              fontFamily: "'Geist Variable', sans-serif",
+              fontWeight: 600,
+            }}
           >
             <Icon className="size-3" strokeWidth={2.25} />
             {label}
           </span>
-          <span className="text-[10px] text-muted-foreground">{formatTimestamp(item.timestamp)}</span>
-          <span className="text-[10px] text-muted-foreground">·</span>
-          <span className="text-[10px] text-muted-foreground">{formatDuration(item.duration_ms)}</span>
+          <span style={{ fontFamily: "'Space Mono', monospace", fontSize: "10px", color: "var(--text-muted)" }}>
+            {formatTimestamp(item.timestamp)}
+          </span>
+          <span style={{ color: "var(--text-muted)", fontSize: "10px" }}>·</span>
+          <span style={{ fontFamily: "'Space Mono', monospace", fontSize: "10px", color: "var(--text-muted)" }}>
+            {formatDuration(item.duration_ms)}
+          </span>
         </div>
         <CopyButton
           text={item.processed_text}
@@ -163,20 +309,50 @@ function HistoryRow({ item }: { item: HistoryItem }) {
           className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
         />
       </div>
-      <p className="line-clamp-3 text-sm leading-relaxed text-foreground">{item.processed_text}</p>
-    </Card>
+
+      <p
+        className="line-clamp-2"
+        style={{
+          fontFamily: "'Geist Variable', sans-serif",
+          fontSize: "13px",
+          fontWeight: 450,
+          lineHeight: 1.5,
+          color: "var(--text-primary)",
+          marginBottom: "8px",
+        }}
+      >
+        {item.processed_text}
+      </p>
+
+      <div className="flex items-center justify-between">
+        <span style={{ fontFamily: "'Space Mono', monospace", fontSize: "10px", color: "var(--text-muted)" }}>
+          {words} palabras
+        </span>
+      </div>
+    </GlassCard>
   );
 }
 
 function EmptyState() {
   return (
     <div className="flex flex-col items-center gap-3 py-16 text-center">
-      <div className="flex size-12 items-center justify-center rounded-full border border-dashed border-border bg-background/60">
-        <HistoryIcon className="size-5 text-muted-foreground" strokeWidth={1.75} />
+      <div
+        className="flex items-center justify-center"
+        style={{
+          width: "48px",
+          height: "48px",
+          borderRadius: "50%",
+          background: "var(--glass-bg-subtle)",
+          border: "0.5px dashed var(--glass-border-outer)",
+        }}
+      >
+        <HistoryIcon style={{ width: "20px", height: "20px", color: "var(--text-muted)" }} strokeWidth={1.85} />
       </div>
       <div>
-        <p className="text-sm font-medium">Aún no hay transcripciones</p>
-        <p className="mt-1 text-xs text-muted-foreground">
+        <p style={{ fontFamily: "'Geist Variable', sans-serif", fontSize: "14px", fontWeight: 600, color: "var(--text-secondary)" }}>
+          Aún no hay transcripciones
+        </p>
+        <p style={{ fontFamily: "'Geist Variable', sans-serif", fontSize: "12px", fontWeight: 450, color: "var(--text-muted)", marginTop: "4px" }}>
           Pulsa el atajo y dicta. Tus transcripciones aparecerán aquí.
         </p>
       </div>

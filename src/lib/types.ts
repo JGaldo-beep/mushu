@@ -1,25 +1,6 @@
-export type ModeName =
-  | "DEFAULT"
-  | "EMAIL"
-  | "FORMAL"
-  | "CASUAL"
-  | "CODE"
-  | "HELP"
-  | "REPLY_EN"
-  | "EXPLAIN"
-  /** Historial guardado antes del cambio de modo */
-  | "TRANSLATE";
+export type ModeName = "DEFAULT" | "EMAIL" | "NOTE";
 
-export type ModeIconName =
-  | "Mic"
-  | "Mail"
-  | "BriefcaseBusiness"
-  | "MessageCircle"
-  | "Code2"
-  | "CircleHelp"
-  | "MessageSquareReply"
-  | "Languages"
-  | "BookOpen";
+export type ModeIconName = "Mic" | "Mail" | "StickyNote";
 
 export type ModeInfo = {
   name: ModeName;
@@ -32,13 +13,18 @@ export type ThemePref = "system" | "light" | "dark";
 
 export type ProcessingMode = "cloud_first" | "local_only";
 
+export type TranscriptionProvider = "groq" | "deepgram";
+
 export type FrontendState = {
   mode: ModeInfo;
   hotkey: string;
   mode_hotkey: string;
+  pause_hotkey: string;
   model: string;
   processing_mode: ProcessingMode;
+  transcription_provider: TranscriptionProvider;
   has_groq_key: boolean;
+  has_deepgram_key: boolean;
   microphones: string[];
   selected_microphone: string | null;
   theme: ThemePref;
@@ -50,8 +36,10 @@ export type FrontendState = {
 export type SaveSettingsInput = {
   hotkey: string;
   mode_hotkey: string;
+  pause_hotkey: string;
   model: string;
   processing_mode: ProcessingMode;
+  transcription_provider: TranscriptionProvider;
   microphone: string | null;
   theme: ThemePref;
   sound_effects_enabled: boolean;
@@ -63,7 +51,7 @@ export type HistoryItem = {
   timestamp: string;
   raw_text: string;
   processed_text: string;
-  mode_used: ModeName;
+  mode_used: ModeName | string;
   duration_ms: number;
 };
 
@@ -75,4 +63,4 @@ export type DictationLatencyPayload = {
   phase: string;
 };
 
-export type NavSection = "home" | "history" | "settings";
+export type NavSection = "home" | "modes" | "ai-features" | "settings" | "account";

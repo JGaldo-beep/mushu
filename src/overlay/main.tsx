@@ -3,8 +3,11 @@ import ReactDOM from "react-dom/client";
 import { Overlay } from "./Overlay";
 import "./overlay.css";
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <Overlay />
-  </React.StrictMode>,
-);
+const rootEl = document.getElementById("root");
+if (rootEl) {
+  ReactDOM.createRoot(rootEl).render(
+    <React.StrictMode>
+      <Overlay />
+    </React.StrictMode>,
+  );
+}

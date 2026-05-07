@@ -9,6 +9,9 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
+  // Important for Tauri production builds: use relative asset paths so
+  // `overlay.html` / `explain.html` can load their JS/CSS under `file://`.
+  base: "./",
 
   resolve: {
     alias: {
